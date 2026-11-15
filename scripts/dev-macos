@@ -1,0 +1,57 @@
+#!/bin/sh
+# Rebuild and relaunch native AppKit code without an extra watcher dependency.
+set -eu
+cd "$(dirname "$0")/.."
+dev_dir=$(mktemp -d "${TMPDIR:-/tmp}/seams-dev.XXXXXX")
+reload_file="$dev_dir/reload"
+app_pid=
+
+fingerprint() {
+    { find src packaging -type f -exec shasum {} +; shasum Cargo.toml Cargo.lock Makefile; } |
+        LC_ALL=C sort | shasum
+}
+
+stop_client() {
+    if [ -n "$app_pid" ]; then
+        touch "$reload_file"
+        attempts=0
+        while kill -0 "$app_pid" 2>/dev/null && [ "$attempts" -lt 30 ]; do
+            sleep 0.1
+            attempts=$((attempts + 1))
+        done
+        if kill -0 "$app_pid" 2>/dev/null; then
+            echo 'App did not quit within 3s; terminating dev process.' >&2
+            kill "$app_pid" 2>/dev/null || true
+        fi
+        wait "$app_pid" 2>/dev/null || true
+        app_pid=
+        rm -f "$reload_file"
+    fi
+}
+
+cleanup() { stop_client; rmdir "$dev_dir"; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+rebuild() {
+    if cargo build --locked --bin seams; then
+        stop_client
+        RUST_BACKTRACE=1 SEAMS_DEV_RELOAD_FILE="$reload_file" target/debug/seams &
+        app_pid=$!
+        echo "Seams dev process $app_pid. Watching Rust sources and build inputs."
+    else
+        echo 'Build failed. Keeping previous app running; waiting for edits.' >&2
+    fi
+}
+
+last=$(fingerprint)
+rebuild
+while :; do
+    sleep 1
+    current=$(fingerprint)
+    if [ "$current" != "$last" ]; then
+        last=$current
+        rebuild
+    fi
+done

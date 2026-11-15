@@ -1,0 +1,15 @@
+[package]
+name = "app-seams"
+version = "0.1.0"
+edition = "2024"
+description = "Native macOS launcher for seamless remote X11 applications over SSH"
+license = "MIT"
+
+[[bin]]
+name = "seams"
+path = "src/main.rs"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSString", "NSGeometry", "NSTimer", "NSRunLoop", "NSDate", "NSURL", "NSArray", "NSNotification", "NSDistributedNotificationCenter"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow", "NSView", "NSControl", "NSTextField", "NSButton", "NSPopUpButton", "NSMenu", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSMenuItem", "NSScrollView", "NSTextView", "NSText", "NSFont", "NSFontDescriptor", "NSGraphics", "objc2-core-foundation", "NSColor", "NSOpenPanel", "NSSavePanel", "NSPanel", "NSAlert", "NSWorkspace", "NSRunningApplication"] }

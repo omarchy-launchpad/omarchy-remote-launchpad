@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+export MACOSX_DEPLOYMENT_TARGET=13.0
+cargo build --release --locked
+mkdir -p dist/Seams.app/Contents/MacOS
+cp target/release/seams dist/Seams.app/Contents/MacOS/seams
+cp packaging/Info.plist dist/Seams.app/Contents/Info.plist
+codesign --force --sign - dist/Seams.app
+echo "Built dist/Seams.app (local ad-hoc signature)."
