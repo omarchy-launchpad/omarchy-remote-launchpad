@@ -1,6 +1,6 @@
-# Seams
+# Omarchy Remote Launchpad
 
-A native macOS launchpad for apps on an SSH-connected Linux desktop. Search by app name or desktop ID, use the arrow keys to select a result, and press Return to launch. Each captured X11 window opens in its own Mac window. The Seams menu bar item brings the launchpad back.
+Seams is a native macOS launchpad for apps on an SSH-connected Linux desktop. Search by app name or desktop ID, use the arrow keys to select a result, and press Return to launch. Each captured X11 window opens in its own Mac window. The Seams menu bar item brings the launchpad back.
 
 ## Run
 
