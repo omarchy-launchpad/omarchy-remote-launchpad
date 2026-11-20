@@ -1,5 +1,5 @@
 //! Native remote window. NSImageView and pointer mapping use the same centered aspect fit.
-use crate::remote::{Control, Stream};
+use crate::remote::WindowStream;
 use objc2::{
     AnyThread, DefinedClass, MainThreadOnly, define_class, msg_send, rc::Retained,
     runtime::ProtocolObject,
@@ -9,19 +9,11 @@ use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
 use omarchy_seams::{messages::Input, protocol::map_pointer};
-use std::{
-    cell::Cell,
-    sync::mpsc::{SyncSender, TrySendError},
-    time::{Duration, Instant},
-};
+use std::cell::Cell;
 
 struct ViewState {
-    input: SyncSender<Control>,
-    pending_motion: Cell<Option<(u32, u32)>>,
-    size: Cell<(u32, u32)>,
+    stream: WindowStream,
     flags: Cell<NSEventModifierFlags>,
-    closed: Cell<bool>,
-    overloaded: Cell<bool>,
 }
 define_class!(
     // SAFETY: All image and window operations run on the AppKit thread.
@@ -32,7 +24,10 @@ define_class!(
     unsafe impl NSObjectProtocol for RemoteView {}
     unsafe impl NSWindowDelegate for RemoteView {
         #[unsafe(method(windowWillClose:))]
-        fn will_close(&self,_:&NSNotification) {self.ivars().closed.set(true);self.release_inputs();}
+        fn will_close(&self, _: &NSNotification) {
+            self.ivars().flags.set(NSEventModifierFlags::empty());
+            self.ivars().stream.request_close();
+        }
         #[unsafe(method(windowDidResignKey:))]
         fn lost_focus(&self,_:&NSNotification) {self.release_inputs();}
     }
@@ -71,39 +66,15 @@ define_class!(
         fn scroll(&self,e:&NSEvent) {
             if let Some((x,y))=self.motion(e) && e.scrollingDeltaY()!=0.0 {
                 let button=if e.scrollingDeltaY()>0.0 {4} else {5};
-                self.send(vec![Input::Motion{x,y}, Input::Button{button,pressed:true},Input::Button{button,pressed:false}]);
+                self.ivars().stream.send_input(vec![Input::Motion{x,y}, Input::Button{button,pressed:true},Input::Button{button,pressed:false}]);
             }
         }
     }
 );
 impl RemoteView {
-    fn send(&self, mut inputs: Vec<Input>) {
-        if let Some((x, y)) = self.ivars().pending_motion.take()
-            && !matches!(
-                inputs.first(),
-                Some(Input::Motion { .. } | Input::ReleaseAll)
-            )
-        {
-            inputs.insert(0, Input::Motion { x, y });
-        }
-        if let Err(TrySendError::Full(_)) = self.ivars().input.try_send(Control::Input(inputs)) {
-            // Detach if an ordered batch can't fit, so held input gets released.
-            self.ivars().overloaded.set(true);
-        }
-    }
-    fn flush_motion(&self) {
-        if let Some((x, y)) = self.ivars().pending_motion.take()
-            && let Err(TrySendError::Full(_)) = self
-                .ivars()
-                .input
-                .try_send(Control::Input(vec![Input::Motion { x, y }]))
-        {
-            self.ivars().pending_motion.set(Some((x, y)));
-        }
-    }
     fn release_inputs(&self) {
         self.ivars().flags.set(NSEventModifierFlags::empty());
-        self.send(vec![Input::ReleaseAll]);
+        self.ivars().stream.release_input();
     }
     fn motion(&self, e: &NSEvent) -> Option<(u32, u32)> {
         let p = self.convertPoint_fromView(e.locationInWindow(), None);
@@ -113,7 +84,11 @@ impl RemoteView {
         } else {
             size.height - p.y
         };
-        map_pointer((size.width, size.height), self.ivars().size.get(), (p.x, y))
+        map_pointer(
+            (size.width, size.height),
+            self.ivars().stream.frame_size(),
+            (p.x, y),
+        )
     }
     fn pointer(&self, e: &NSEvent, button: Option<(u8, bool)>) {
         // AppKit can deliver the activating click before the window becomes key.
@@ -122,12 +97,12 @@ impl RemoteView {
         }
         if let Some((x, y)) = self.motion(e) {
             if let Some((button, pressed)) = button {
-                self.send(vec![
+                self.ivars().stream.send_input(vec![
                     Input::Motion { x, y },
                     Input::Button { button, pressed },
                 ]);
             } else {
-                self.ivars().pending_motion.set(Some((x, y)));
+                self.ivars().stream.pointer_motion(x, y);
             }
         } else if matches!(button, Some((_, false))) {
             self.release_inputs()
@@ -141,7 +116,7 @@ impl RemoteView {
             (NSEventModifierFlags::Option, 0xffe9),
         ] {
             if old.contains(flag) != now.contains(flag) {
-                self.send(vec![Input::Key {
+                self.ivars().stream.send_input(vec![Input::Key {
                     keysym,
                     pressed: now.contains(flag),
                 }]);
@@ -153,7 +128,9 @@ impl RemoteView {
         if let Some(s) = e.charactersByApplyingModifiers(NSEventModifierFlags::empty())
             && let Some(keysym) = keysym(&s.to_string())
         {
-            self.send(vec![Input::Key { keysym, pressed }]);
+            self.ivars()
+                .stream
+                .send_input(vec![Input::Key { keysym, pressed }]);
         }
     }
 }
@@ -210,17 +187,14 @@ fn bitmap(w: u32, h: u32, rgba: &[u8]) -> Result<Retained<NSImage>, String> {
 pub struct Viewer {
     window: Retained<NSWindow>,
     view: Retained<RemoteView>,
-    stream: Stream,
     hidden: bool,
-    viewport: NSSize,
-    resize_since: Option<Instant>,
 }
 impl Viewer {
     pub fn is_visible(&self) -> bool {
         self.window.isVisible()
     }
 
-    pub fn new(mtm: MainThreadMarker, stream: Stream) -> Self {
+    pub fn new(mtm: MainThreadMarker, stream: WindowStream) -> Self {
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(640., 480.));
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -237,7 +211,7 @@ impl Viewer {
         unsafe { window.setReleasedWhenClosed(false) };
         let view: Retained<RemoteView> = unsafe {
             msg_send![super(RemoteView::alloc(mtm).set_ivars(ViewState{
-            input:stream.input.clone(),pending_motion:Cell::default(),size:Cell::default(),flags:Cell::new(NSEventModifierFlags::empty()),closed:Cell::default(),overloaded:Cell::default()
+            stream, flags: Cell::new(NSEventModifierFlags::empty())
         })),initWithFrame:frame]
         };
         view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
@@ -248,89 +222,42 @@ impl Viewer {
         Self {
             window,
             view,
-            stream,
             hidden: true,
-            viewport: NSSize::new(0., 0.),
-            resize_since: None,
-        }
-    }
-
-    // Fit immediately on the Mac. Request one Linux layout after the drag settles.
-    fn sync_viewport(&mut self) {
-        if self.view.ivars().size.get() == (0, 0) {
-            return;
-        }
-        let size = self.view.bounds().size;
-        if self.viewport != size {
-            self.viewport = size;
-            self.resize_since = Some(Instant::now());
-        }
-        if self.view.inLiveResize()
-            || !self
-                .resize_since
-                .is_some_and(|t| t.elapsed() >= Duration::from_millis(100))
-        {
-            return;
-        }
-        let (w, h) = (size.width.round() as u32, size.height.round() as u32);
-        self.resize_since = None;
-        if w == 0
-            || h == 0
-            || w > 16384
-            || h > 16384
-            || u64::from(w) * u64::from(h) * 4 + 8 > omarchy_seams::protocol::MAX_PAYLOAD as u64
-            || self.view.ivars().size.get() == (w, h)
-        {
-            return;
-        }
-        match self.stream.input.try_send(Control::Resize(w, h)) {
-            Ok(()) => {}
-            Err(std::sync::mpsc::TrySendError::Full(_)) => self.resize_since = Some(Instant::now()),
-            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {}
         }
     }
 
     // Ok(false) detaches this local window.
     pub fn tick(&mut self) -> Result<bool, String> {
-        if self.view.ivars().closed.get() {
+        let stream = &self.view.ivars().stream;
+        let first_frame = stream.frame_size() == (0, 0);
+        let Some(update) = stream.poll()? else {
             return Ok(false);
-        }
-        if let Some(done) = self.stream.task.poll() {
-            return done.map(|()| false);
-        }
-        if self.view.ivars().overloaded.get() {
-            return Err("Input queue filled. Open the app again from Launchpad.".into());
-        }
-        let update = std::mem::take(&mut *self.stream.update.lock().unwrap());
+        };
         if let Some(title) = update.title {
             self.window.setTitle(&NSString::from_str(&title))
         }
         if update.hidden {
-            self.view.ivars().pending_motion.take();
             self.hidden = true;
             self.window.orderOut(None);
             self.view.setImage(None);
         }
         if let Some((w, h, pixels)) = update.frame {
-            if self.view.ivars().size.get() != (w, h) {
-                self.view.ivars().pending_motion.take();
-            }
-            if self.view.ivars().size.get() == (0, 0) {
+            if first_frame {
                 let fit = (960. / f64::from(w)).min(720. / f64::from(h)).min(1.);
                 self.window
                     .setContentSize(NSSize::new(f64::from(w) * fit, f64::from(h) * fit));
                 self.window.center();
-                self.viewport = self.view.bounds().size;
+                let size = self.view.bounds().size;
+                stream.set_initial_viewport((size.width, size.height));
             }
-            self.view.ivars().size.set((w, h));
             self.view.setImage(Some(&*bitmap(w, h, &pixels)?));
             if self.hidden {
                 self.window.makeKeyAndOrderFront(None);
                 self.hidden = false;
             }
         }
-        self.view.flush_motion();
-        self.sync_viewport();
+        let size = self.view.bounds().size;
+        stream.sync_controls((size.width, size.height), self.view.inLiveResize());
         Ok(true)
     }
 }
@@ -338,6 +265,7 @@ impl Drop for Viewer {
     fn drop(&mut self) {
         self.window.setDelegate(None);
         self.window.orderOut(None);
+        self.view.ivars().stream.detach();
     }
 }
 

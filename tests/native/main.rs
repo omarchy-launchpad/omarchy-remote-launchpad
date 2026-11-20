@@ -234,7 +234,24 @@ mod ui {
         }
         pump_until(&delegate, || pixel(&w) == Some([255, 255, 0, 255]));
         println!("Resized Linux frame to 320 × 180 and verified click at (275, 140).");
-        println!("Search, launch, native frames, keyboard input and dialog passed.");
+        let dialog = window(mtm, "Seams dialog").unwrap();
+        dialog.close();
+        w.close();
+        pump_until(&delegate, || {
+            let mut detached = false;
+            delegate.with(|c| detached = c.launches.iter().all(|launch| launch.views.is_empty()));
+            detached
+        });
+
+        // Keep the old AppKit objects alive and reopen the same Linux window.
+        delegate.choose(sel!(chooseApp:), None);
+        pump_until(&delegate, || {
+            window(mtm, "Seams fixture")
+                .is_some_and(|reopened| pixel(&reopened) == Some([255, 255, 0, 255]))
+        });
+        assert!(!w.isVisible());
+        assert!(!dialog.isVisible());
+        println!("Closing the viewers left the Linux app running with its pixels intact.");
     }
 }
 fn main() {

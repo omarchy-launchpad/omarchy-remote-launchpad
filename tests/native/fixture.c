@@ -1,12 +1,20 @@
 // Disposable application for the AppKit test. A key release changes the pixels
 // and opens a second top-level window owned by the same X11 client.
 #include <X11/Xlib.h>
+#include <X11/Xatom.h>
+#include <X11/Xutil.h>
 int main(void) {
     Display *d = XOpenDisplay(NULL);
     if (!d) return 1;
     Window root = DefaultRootWindow(d);
     Window w = XCreateSimpleWindow(d, root, 0, 0, 96, 64, 0, 0, 0xff0000);
     XStoreName(d, w, "Seams fixture");
+    XClassHint class = { "seams-fixture", "seams-fixture" };
+    XSetClassHint(d, w, &class);
+    // Xvfb has no window manager to publish the desktop's client list.
+    Atom clients = XInternAtom(d, "_NET_CLIENT_LIST", False);
+    XChangeProperty(d, root, clients, XA_WINDOW, 32, PropModeReplace,
+                    (unsigned char *)&w, 1);
     XSelectInput(d, w, KeyPressMask | KeyReleaseMask | ButtonReleaseMask);
     XMapWindow(d, w);
     XSetInputFocus(d, w, RevertToParent, CurrentTime);

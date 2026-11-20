@@ -1,20 +1,19 @@
 //! Blocking SSH and bridge I/O. AppKit only polls completed work and the latest frame.
 use crate::config::Host;
-use omarchy_seams::{
-    client::{self, Event},
-    messages::{CAP_CAPTURE, CAP_INPUT, CAP_RESIZE, Input},
-};
+#[path = "remote/window_stream.rs"]
+mod window_stream;
 use std::{
     fs::File,
     io::{self, BufRead, BufReader, Read},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         Arc, Mutex,
-        mpsc::{self, Receiver, SyncSender},
+        mpsc::{self, Receiver},
     },
     thread,
     time::Duration,
 };
+pub use window_stream::WindowStream;
 
 pub fn token() -> io::Result<String> {
     let mut bytes = [0; 16];
@@ -179,81 +178,8 @@ pub fn watch(p: &Host, token: &str, app: &App) -> Result<Watch, String> {
     Ok(Watch { task, windows })
 }
 
-#[derive(Default)]
-pub struct Update {
-    pub title: Option<String>,
-    pub frame: Option<(u32, u32, Vec<u8>)>,
-    pub hidden: bool,
-}
-pub enum Control {
-    Input(Vec<Input>),
-    Resize(u32, u32),
-}
-pub struct Stream {
-    pub task: Task<()>,
-    pub update: Arc<Mutex<Update>>,
-    pub input: SyncSender<Control>,
-}
-pub fn stream(p: &Host, token: &str, xid: u32, app: &App) -> Result<Stream, String> {
-    stream_command(ssh(p, &["attach-app", token, &xid.to_string(), &app.id]))
-}
-pub(crate) fn stream_command(command: Command) -> Result<Stream, String> {
-    let update = Arc::new(Mutex::new(Update::default()));
-    let state = update.clone();
-    let (input, controls) = mpsc::sync_channel::<Control>(64);
-    let task = Task::spawn(command, move |stdout, stdin| {
-        let (mut reader, mut writer) = client::connect_optional(
-            BufReader::new(stdout),
-            stdin,
-            CAP_CAPTURE | CAP_INPUT,
-            CAP_RESIZE,
-        )?;
-        thread::spawn(move || {
-            while let Ok(control) = controls.recv() {
-                let result = match control {
-                    Control::Input(batch) => {
-                        batch.into_iter().try_for_each(|event| writer.input(event))
-                    }
-                    Control::Resize(w, h) if writer.info().capabilities & CAP_RESIZE != 0 => {
-                        writer.resize(w, h)
-                    }
-                    Control::Resize(..) => Ok(()),
-                };
-                if let Err(e) = result
-                    && e.kind() != io::ErrorKind::WouldBlock
-                {
-                    return;
-                }
-            }
-        });
-        while let Some(event) = reader.next_event()? {
-            let mut pending = state.lock().unwrap();
-            match event {
-                Event::Window(info) => pending.title = Some(info.title),
-                Event::Frame {
-                    width,
-                    height,
-                    rgba,
-                } => {
-                    pending.hidden = false;
-                    pending.frame = Some((width, height, rgba));
-                }
-                Event::Hidden => {
-                    pending.frame = None;
-                    pending.hidden = true;
-                }
-                Event::Destroyed => return Ok(()),
-            }
-        }
-        Err(io::Error::other(
-            "Window connection closed. Check SSH access to the host.",
-        ))
-    })?;
-    Ok(Stream {
-        task,
-        update,
-        input,
-    })
+pub fn stream(p: &Host, token: &str, xid: u32, app: &App) -> Result<WindowStream, String> {
+    WindowStream::start(ssh(p, &["attach-app", token, &xid.to_string(), &app.id]))
 }
 
 #[cfg(test)]
