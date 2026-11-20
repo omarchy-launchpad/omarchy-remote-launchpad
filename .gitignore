@@ -26,3 +26,6 @@ rustc-ice-*.txt
 __pycache__/
 *.pyc
 dist/
+
+/seams.local
+/errors.txt

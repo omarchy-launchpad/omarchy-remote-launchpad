@@ -1,0 +1,53 @@
+#!/bin/sh
+# macOS AppKit -> system SSH -> disposable Linux desktop entry and Xvfb.
+set -eu
+cd "$(dirname "$0")/.."
+umask 077
+work=$(mktemp -d "${TMPDIR:-/tmp}/seams-native.XXXXXXXX")
+container=
+cleanup() {
+    if [ -n "$container" ]; then docker rm -f "$container" >/dev/null; fi
+    rm -rf "$work"
+}
+trap cleanup EXIT
+trap 'exit 1' INT TERM
+docker build -q -t seams-launch-fixture -f ../x11-bridge/scripts/Dockerfile.xvfb ../x11-bridge >/dev/null
+ssh-keygen -q -t ed25519 -N '' -f "$work/client"
+container=$(docker run -d --rm -p 127.0.0.1::2222 --entrypoint sleep seams-launch-fixture 900)
+docker cp "$work/client.pub" "$container:/tmp/test-client.pub"
+docker cp tests/native/fixture.c "$container:/tmp/fixture.c"
+docker exec -i "$container" sh -eu <<'LINUX'
+cc /tmp/fixture.c -o /usr/local/bin/seams-fixture -lX11
+install -m755 /work/target/debug/x11-bridge-agent /usr/local/bin
+install -d -o bridge -g bridge -m700 /home/bridge/.ssh
+install -o bridge -g bridge -m600 /tmp/test-client.pub /home/bridge/.ssh/authorized_keys
+install -d /usr/share/applications /run/sshd
+# A locked account cannot authenticate on Debian even with a trusted key.
+passwd -d bridge >/dev/null
+ssh-keygen -q -t ed25519 -N '' -f /tmp/host
+cookie=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+su bridge -c "touch ~/.Xauthority && chmod 600 ~/.Xauthority && xauth add :9 . $cookie"
+su bridge -c 'Xvfb :9 -auth "$HOME/.Xauthority" -nolisten tcp -screen 0 1024x768x24' >/tmp/xvfb.log 2>&1 &
+cat > /usr/share/applications/seams-fixture.desktop <<'ENTRY'
+[Desktop Entry]
+Type=Application
+Name=Seams smoke fixture
+Exec=/usr/local/bin/seams-fixture
+ENTRY
+/usr/sbin/sshd -p 2222 -h /tmp/host -o UsePAM=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o AuthenticationMethods=publickey -o AllowUsers=bridge -o PermitRootLogin=no -o DisableForwarding=yes -o SetEnv=DISPLAY=:9
+LINUX
+port=$(docker port "$container" 2222/tcp | cut -d: -f2)
+printf '[127.0.0.1]:%s ' "$port" > "$work/known_hosts"
+docker exec "$container" cat /tmp/host.pub >> "$work/known_hosts"
+cat > "$work/config" <<CONFIG
+Host seams-fixture
+    HostName 127.0.0.1
+    User bridge
+    Port $port
+    IdentityFile "$work/client"
+    IdentitiesOnly yes
+    IdentityAgent none
+    UserKnownHostsFile "$work/known_hosts"
+    GlobalKnownHostsFile /dev/null
+CONFIG
+SEAMS_FIXTURE_SSH_CONFIG="$work/config" cargo test --test native --locked

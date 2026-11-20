@@ -1,18 +1,21 @@
+mod config;
 mod instance;
-mod model;
-mod session;
-mod store;
+#[cfg(target_os = "macos")]
+mod launcher;
+mod remote;
 #[cfg(target_os = "macos")]
 mod ui;
+#[cfg(target_os = "macos")]
+mod viewer;
 
 fn main() {
     #[cfg(target_os = "macos")]
     {
-        let _instance = match instance::acquire(&store::directory().join("instance.lock")) {
+        let _instance = match instance::acquire(&config::directory().join("instance.lock")) {
             Ok(Some(lock)) => lock,
             Ok(None) => {
                 ui::activate_existing();
-                eprintln!("Seams is already running. Showing its connection manager.");
+                eprintln!("Seams is already running. Showing its launchpad.");
                 return;
             }
             Err(error) => {

@@ -1,13 +1,17 @@
-#!/bin/sh
+#!/bin/bash
 # Rebuild and relaunch native AppKit code without an extra watcher dependency.
-set -eu
+set -euo pipefail
 cd "$(dirname "$0")/.."
+error_log="$PWD/errors.txt"
+(umask 077; touch "$error_log")
+exec 2> >(tee -a "$error_log" >&2)
+echo "Dev error log: $error_log"
 dev_dir=$(mktemp -d "${TMPDIR:-/tmp}/seams-dev.XXXXXX")
 reload_file="$dev_dir/reload"
 app_pid=
 
 fingerprint() {
-    { find src packaging -type f -exec shasum {} +; shasum Cargo.toml Cargo.lock Makefile; } |
+    { find src packaging ../x11-bridge/crates/protocol/src -type f -exec shasum {} +; shasum Cargo.toml Cargo.lock Makefile ../x11-bridge/Cargo.toml ../x11-bridge/crates/protocol/Cargo.toml; } |
         LC_ALL=C sort | shasum
 }
 
@@ -29,18 +33,19 @@ stop_client() {
     fi
 }
 
-cleanup() { stop_client; rmdir "$dev_dir"; }
+cleanup() { stop_client; rm -f "$dev_dir/build"; rmdir "$dev_dir"; }
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
 rebuild() {
-    if cargo build --locked --bin seams; then
+    if cargo build --locked --bin seams 2>&1 | tee "$dev_dir/build"; then
         stop_client
         RUST_BACKTRACE=1 SEAMS_DEV_RELOAD_FILE="$reload_file" target/debug/seams &
         app_pid=$!
         echo "Seams dev process $app_pid. Watching Rust sources and build inputs."
     else
+        { date -u '+[%Y-%m-%dT%H:%M:%SZ] cargo build failed'; cat "$dev_dir/build"; } >> "$error_log"
         echo 'Build failed. Keeping previous app running; waiting for edits.' >&2
     fi
 }
@@ -49,6 +54,10 @@ last=$(fingerprint)
 rebuild
 while :; do
     sleep 1
+    if [ -n "$app_pid" ] && ! kill -0 "$app_pid" 2>/dev/null; then
+        wait "$app_pid" || echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Seams exited with status $?." >&2
+        app_pid=
+    fi
     current=$(fingerprint)
     if [ "$current" != "$last" ]; then
         last=$current
