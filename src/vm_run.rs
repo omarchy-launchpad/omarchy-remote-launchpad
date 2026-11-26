@@ -60,7 +60,12 @@ pub struct VmRun {
 }
 
 impl VmRun {
-    pub fn start(helper: &Path, name: &str, storage: Option<&Path>) -> Result<Self, String> {
+    pub fn start(
+        helper: &Path,
+        name: &str,
+        storage: Option<&Path>,
+        factory_cache: Option<&Path>,
+    ) -> Result<Self, String> {
         let product = if name.chars().count() <= 64 && name.len() <= 255 {
             name
         } else {
@@ -87,6 +92,11 @@ impl VmRun {
             {
                 command.env_remove(key);
             }
+        }
+        // Try Omarchy stores the decompressed factory beside each VM by default.
+        // Point all Launchpad VMs at one shared cache so later VMs clone it.
+        if let Some(path) = factory_cache {
+            command.env("OMARCHY_QEMU_GPU_FACTORY_CACHE", path);
         }
         let mut child = command
             .arg("--run-vm")
@@ -229,7 +239,7 @@ touch "$(dirname "$0")/shutdown"
         fs::set_permissions(&helper, fs::Permissions::from_mode(0o700)).unwrap();
 
         let workspace = root.join("Development guest");
-        let mut run = VmRun::start(&helper, "Development", Some(&workspace)).unwrap();
+        let mut run = VmRun::start(&helper, "Development", Some(&workspace), None).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         while !run.message().starts_with("VM started.") {
             let (_, exited) = run.poll();

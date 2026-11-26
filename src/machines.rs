@@ -570,7 +570,15 @@ impl Machines {
         for (port, machine) in queued {
             let result = machine
                 .vm_storage(&self.vm_data_directory.join("VMs"))
-                .and_then(|storage| VmRun::start(&helper, &machine.name, storage.as_deref()));
+                .and_then(|storage| {
+                    let factory_cache = self.vm_data_directory.join("VMs/shell-factory");
+                    VmRun::start(
+                        &helper,
+                        &machine.name,
+                        storage.as_deref(),
+                        Some(&factory_cache),
+                    )
+                });
             match result {
                 Ok(run) => {
                     if selected == Some(port) {
