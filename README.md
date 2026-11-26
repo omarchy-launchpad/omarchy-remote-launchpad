@@ -2,7 +2,7 @@
 
 Seams is a native macOS launchpad for apps on an SSH-connected Linux desktop. Search by app name or desktop ID, use the arrow keys to select a result, and press Return to launch. Each captured X11 window opens in its own Mac window. The Seams menu bar item brings the launchpad back.
 
-## Run
+## Run with an existing Linux host
 
 Requires macOS 13+, Rust, Apple command line tools and the sibling x11-bridge checkout with desktop launch support.
 
@@ -13,6 +13,19 @@ Requires macOS 13+, Rust, Apple command line tools and the sibling x11-bridge ch
 `make dev` appends failed build output, runtime diagnostics and launcher errors to `errors.txt` in the checkout. Git ignores this file. Invoke `$fix-errors` to investigate the recorded failures.
 
 When moved outside the checkout, the app reads `~/Library/Application Support/Seams/seams.local`. Set `SEAMS_CONFIG` to override the file path. The app bundle contains no connection settings.
+
+## Run with a local Omarchy VM
+
+Use an Apple silicon Mac running macOS 15 or newer, Rust, Apple command line tools and a sibling x11-bridge checkout with desktop launch support. [Try Omarchy v1.4.1](https://github.com/omacom/try-omarchy/releases/tag/v1.4.1) provisions a persistent ARM64 Omarchy guest with native CPU virtualization and accelerated graphics. The x86-64 ISO would need CPU emulation on these Macs. Intel hosts and x86 guests are outside this flow. Allow about 15 GB free on APFS for first boot, plus space for guest apps and builds. The runtime defaults to 4 or 8 GiB guest RAM according to host memory and a grow-on-use 64 GiB disk. [Runtime and storage details](https://github.com/omacom/try-omarchy/blob/v1.4.1/manual/updates-and-data.md)
+
+1. Install Try Omarchy from its release DMG in Applications. From the Seams checkout, run `scripts/local-vm start`. Choose **Launch Omarchy** to download the image. Complete first boot, create your Linux account and log in to the desktop.
+2. In Try Omarchy settings, use shared networking. Under **Network → Port Forwarding**, select **Add SSH**, save, and restart the guest to apply the change. This forwards Mac loopback port 2222 to guest port 22. Log in again. [Upstream SSH instructions](https://github.com/omacom/try-omarchy/blob/v1.4.1/manual/files-network-devices.md)
+3. On the Mac, run `scripts/local-vm setup YOUR_LINUX_USER`. Append the host port if you changed it. Compare the SSH fingerprint with the one printed by `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` in the guest console. Enter the guest password when prompted. Setup installs a dedicated SSH key, builds the agent from the same sibling x11-bridge checkout used by Seams, and installs it under `~/.local/bin` in the guest. The guest may prompt for permission to install build tools and `xdpyinfo`. Setup configures Hyprland to scale Xwayland apps with the guest desktop so a resize in Mac points produces the requested X11 bitmap size on Retina displays.
+4. Setup checks Xwayland and reads the app catalogue before saving the target. Run `make run`, or press **Refresh** in an open Launchpad. Search for `lstopo` (Hardware Locality), press Return and resize its Mac window. The guest draws the hardware topology at the new size.
+
+After a restart, choose **Open Local VM…** in the Seams menu, launch the same guest, log in and press **Refresh**. Guest apps, profiles and files stay on the VM disk. Run `scripts/local-vm status YOUR_LINUX_USER [PORT]` for a connection check. A refused connection usually means the VM is stopped or the forward needs applying. If the desktop check fails, unlock the graphical session for that account and retry.
+
+Setup stores its SSH key and pinned host keys under `~/.ssh/seams-vm/`. Switching VMs on the same forwarded port changes the server fingerprint. Verify the replacement in its console before removing the old entry with `ssh-keygen -f ~/.ssh/seams-vm/known_hosts -R '[127.0.0.1]:2222'` and repeating setup. To return to an existing SSH target, run `cargo run -- --select-target USER@HOST`, then press **Refresh**. Both target types use the same catalogue check and config file selection described above.
 
 ## Bridge behavior
 
@@ -29,4 +42,5 @@ Native Wayland windows and apps that hand off to an existing process can appear 
 - `make check` checks formatting and runs Clippy.
 - `make test` runs unit tests.
 - `./scripts/test-native` launches an isolated Xvfb app through Docker and SSH. It checks AppKit pixels, keyboard delivery, dialog capture, remote resize and pointer accuracy.
+- With a local VM selected, `SEAMS_TEST_DESKTOP_ID=lstopo.desktop SEAMS_TEST_TILED_RESIZE=1 cargo test --test native --locked` checks the stock X11 app at two Mac window sizes. Repeat after shutting down and starting the guest to check reconnect.
 - `SEAMS_TEST_DESKTOP_ID=<desktop-id> cargo test --test native --locked` launches that installed app on the configured host and checks for a visible AppKit image.

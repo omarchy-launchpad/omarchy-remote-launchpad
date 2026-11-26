@@ -1,0 +1,68 @@
+#!/bin/bash
+# Connect Seams to the signed Try Omarchy runtime on an Apple silicon Mac.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+umask 077
+
+fail() { echo "$*" >&2; exit 1; }
+[[ $(uname -sm) == "Darwin arm64" && $(sw_vers -productVersion | cut -d. -f1) -ge 15 ]] ||
+    fail "Try Omarchy needs Apple silicon and macOS 15 or newer."
+
+case ${1:-} in
+    start)
+        exec open -b dev.tryomarchy.native ;;
+    setup|status) ;;
+    *) fail "Usage: scripts/local-vm start | {setup|status} USER [SSH_PORT]" ;;
+esac
+
+user=${2:-}
+port=${3:-2222}
+[[ $# -ge 2 && $# -le 3 && $user =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] ||
+    fail "Supply the desktop account created in Omarchy."
+[[ $port =~ ^[0-9]{1,5}$ ]] && ((10#$port > 0 && 10#$port <= 65535)) ||
+    fail "SSH port must be between 1 and 65535."
+port=$((10#$port))
+target="vm://$user:$port"
+if [[ $1 == status ]]; then
+    exec cargo run --quiet --locked -- --check-target "$target"
+fi
+guest="$user@127.0.0.1"
+keys="$HOME/.ssh/seams-vm"
+mkdir -p "$keys"
+if [[ ! -f $keys/client ]]; then
+    ssh-keygen -q -t ed25519 -N '' -C seams-local-vm -f "$keys/client"
+fi
+opts=(-F /dev/null -p "$port" -o IdentityAgent=none -o IdentitiesOnly=yes
+      -o "UserKnownHostsFile=~/.ssh/seams-vm/known_hosts" -o GlobalKnownHostsFile=/dev/null
+      -o HostKeyAlgorithms=ssh-ed25519 -o ConnectTimeout=8)
+echo 'In the guest terminal, run: ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub'
+echo 'Compare its SHA256 fingerprint with the SSH prompt before accepting.'
+ssh-copy-id -i "$keys/client.pub" "${opts[@]}" -o StrictHostKeyChecking=ask "$guest"
+ssh_vm=(ssh "${opts[@]}" -i "$keys/client" -o StrictHostKeyChecking=yes -o BatchMode=yes)
+"${ssh_vm[@]}" "$guest" 'test "$(uname -m)" = aarch64' ||
+    fail "Check the SSH port and account for the ARM64 Omarchy VM."
+# Build the same sibling sources used by the Mac client.
+"${ssh_vm[@]}" -t "$guest" 'cargo --version && command -v cc || sudo pacman -S --needed rust gcc'
+COPYFILE_DISABLE=1 tar -C ../x11-bridge --no-xattrs --exclude=.DS_Store -cf - Cargo.toml Cargo.lock crates |
+    "${ssh_vm[@]}" "$guest" 'set -eu
+        build=$(mktemp -d); trap '\''rm -rf "$build"'\'' EXIT
+        cd "$build"; tar xf -; cargo build --release --locked -p x11-bridge-agent
+        mkdir -p ~/.local/bin
+        tmp=$(mktemp ~/.local/bin/.seams-agent.XXXXXX)
+        install -m755 target/release/x11-bridge-agent "$tmp"
+        mv "$tmp" ~/.local/bin/x11-bridge-agent'
+"${ssh_vm[@]}" -t "$guest" 'command -v xdpyinfo || sudo pacman -S --needed xorg-xdpyinfo'
+# Match Xwayland pixels to Hyprland's logical resize coordinates on Retina displays.
+"${ssh_vm[@]}" "$guest" sh -s <<'GUEST'
+set -eu
+setting='hl.config({ xwayland = { force_zero_scaling = false } })'
+config="$HOME/.config/hypr/hyprland.lua"
+[ -f "$config" ] || { echo "Log in to the Omarchy Hyprland session and retry setup." >&2; exit 1; }
+systemd-run --user --wait --pipe --quiet hyprctl eval "$setting" | grep -qx ok
+(
+    flock -x 9
+    grep -Fxq "$setting" "$config" || printf '\n%s\n' "$setting" >&9
+) 9>>"$config"
+GUEST
+cargo run --quiet --locked -- --select-target "$target"
+echo 'Open Seams or press Refresh in Launchpad.'
