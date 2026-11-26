@@ -13,7 +13,9 @@ use objc2::{
     sel,
 };
 use objc2_app_kit::*;
-use objc2_foundation::{MainThreadMarker, NSIndexSet, NSObject, NSObjectProtocol, NSString};
+use objc2_foundation::{
+    MainThreadMarker, NSIndexSet, NSObject, NSObjectProtocol, NSString, NSUserName,
+};
 use std::{
     cell::RefCell,
     collections::HashMap,
@@ -355,7 +357,12 @@ impl Machines {
             ..
         }) = self.selected()
         {
-            self.set_input("Guest username", &user);
+            let suggestion = if user.is_empty() {
+                mac_guest_username()
+            } else {
+                user
+            };
+            self.set_input("Guest username", &suggestion);
             if let Some(run) = self.vms.get(&port) {
                 self.message(run.message());
             } else if self
@@ -463,11 +470,18 @@ impl Machines {
         self.editing = Some(kind);
         match kind {
             NewMachine::Remote => self.set_input("SSH alias or user@host", ""),
-            NewMachine::Vm => self.set_input("VM name", ""),
+            NewMachine::Vm => {
+                let data = self.rows.ivars().borrow();
+                self.set_input("VM name", &default_vm_name(&data.saved));
+            }
         }
         self.message("");
         self.update_controls();
         self.window.makeFirstResponder(Some(&self.input));
+        if kind == NewMachine::Vm {
+            // The whole suggested name is selected so typing replaces it.
+            unsafe { self.input.selectText(None) };
+        }
     }
 
     pub fn cancel_add(&mut self) {
@@ -744,9 +758,7 @@ impl Machines {
             None if vm && !vm_supported() => {
                 "Try Omarchy requires Apple silicon and macOS 15 or newer."
             }
-            None if vm => {
-                "Open the VM and sign in. Enter your guest username, then choose Set up access on first use."
-            }
+            None if vm => "Sign in to Omarchy, then choose Set up access on first use.",
             None if remote && remote::can_install_agent() => {
                 "Install the bridge agent if needed, then connect to load this machine's apps."
             }
@@ -755,13 +767,91 @@ impl Machines {
             }
             None => "Add an SSH machine or create an Omarchy VM.",
         };
-        self.hint.setStringValue(&text(hint));
+        let mut hint = hint.to_owned();
+        if self.editing == Some(NewMachine::Vm)
+            || matches!(selected.as_ref().map(|machine| &machine.connection),
+                Some(MachineConnection::Vm { user, .. }) if vm_supported() && user.is_empty())
+        {
+            let username = mac_guest_username();
+            if !username.is_empty() {
+                hint.push_str(&format!(" Suggested guest username: {username}."));
+            }
+            if let Some(layout) = mac_keyboard_layout() {
+                hint.push_str(&format!(" Mac layout: {layout}."));
+            }
+        }
+        self.hint.setStringValue(&text(&hint));
+        self.hint.setToolTip(Some(&text(&hint)));
         self.save
             .setTitle(&text(if self.editing == Some(NewMachine::Vm) {
                 "Create & Open"
             } else {
                 "Save Machine"
             }));
+    }
+}
+
+fn default_vm_name(saved: &[Machine]) -> String {
+    if saved.iter().all(|machine| machine.name != "Omarchy") {
+        return "Omarchy".into();
+    }
+    (2..)
+        .map(|number| format!("Omarchy {number}"))
+        .find(|name| saved.iter().all(|machine| &machine.name != name))
+        .expect("a finite list cannot use every VM name")
+}
+
+fn mac_guest_username() -> String {
+    let username = NSUserName().to_string();
+    let valid_start = username
+        .bytes()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == b'_');
+    let valid_chars = username
+        .bytes()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"_-".contains(&c));
+    if valid_start && valid_chars && username.len() <= 32 && username != "root" {
+        username
+    } else {
+        String::new()
+    }
+}
+
+fn mac_keyboard_layout() -> Option<String> {
+    use std::ffi::c_void;
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn TISCopyCurrentKeyboardLayoutInputSource() -> *mut c_void;
+        fn TISGetInputSourceProperty(source: *mut c_void, key: *const c_void) -> *const NSString;
+        static kTISPropertyInputSourceID: *const c_void;
+        static kTISPropertyLocalizedName: *const c_void;
+    }
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFRelease(object: *mut c_void);
+    }
+
+    // TIS owns these CFString properties until the copied input source is released.
+    unsafe {
+        let source = TISCopyCurrentKeyboardLayoutInputSource();
+        if source.is_null() {
+            return None;
+        }
+        let id = TISGetInputSourceProperty(source, kTISPropertyInputSourceID)
+            .as_ref()
+            .map(ToString::to_string);
+        let layout = match id.as_deref() {
+            Some("com.apple.keylayout.ABC" | "com.apple.keylayout.US") => {
+                Some("English (US)".into())
+            }
+            Some("com.apple.keylayout.British") => Some("English (UK)".into()),
+            _ => TISGetInputSourceProperty(source, kTISPropertyLocalizedName)
+                .as_ref()
+                .map(ToString::to_string),
+        };
+        CFRelease(source);
+        layout
     }
 }
 

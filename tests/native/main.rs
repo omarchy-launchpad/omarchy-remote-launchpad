@@ -189,6 +189,7 @@ mod ui {
         assert_eq!(table.numberOfRows(), 0);
         if create.isEnabled() {
             unsafe { create.performClick(None) };
+            assert_eq!(input.stringValue().to_string(), "Omarchy");
             let save_vm = button("Create & Open");
             assert!(!save_vm.isHidden());
             if std::env::var_os("OMARCHY_LAUNCHPAD_TEST_VM_RUNTIME").is_some() {

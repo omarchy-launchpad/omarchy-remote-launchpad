@@ -18,7 +18,7 @@ minicbor = { version = "2", features = ["alloc"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 objc2 = "0.6.5"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSProcessInfo", "NSString", "NSGeometry", "NSTimer", "NSIndexSet", "NSRunLoop", "NSDate", "NSURL", "NSArray", "NSNotification", "NSDistributedNotificationCenter", "NSData"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSPathUtilities", "NSProcessInfo", "NSString", "NSGeometry", "NSTimer", "NSIndexSet", "NSRunLoop", "NSDate", "NSURL", "NSArray", "NSNotification", "NSDistributedNotificationCenter", "NSData"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSAccessibilityProtocols", "NSAlert", "NSResponder", "NSWindow", "NSView", "NSControl", "NSTextField", "NSSecureTextField", "NSButton", "NSRunningApplication", "NSBox", "NSAppearance", "NSParagraphStyle", "NSScroller", "NSTableCellView", "NSTableRowView", "NSMenu", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSMenuItem", "NSScrollView", "NSTextView", "NSText", "NSFont", "NSFontDescriptor", "NSGraphics", "objc2-core-foundation", "NSColor", "NSEvent", "NSGraphicsContext", "NSBitmapImageRep", "NSImageRep", "NSImage", "NSImageView", "NSCell", "NSTableView", "NSTableColumn", "NSTableHeaderView", "NSUserInterfaceItemIdentification"] }
 
 [[test]]
