@@ -93,17 +93,39 @@ impl Machine {
         else {
             return Err("Select a VM first.".into());
         };
-        let Some(workspace) = workspace else {
+        let Some(path) = vm_workspace(root, workspace.as_deref())? else {
             return Ok(None);
         };
-        if workspace.len() != 32 || !workspace.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Err("Invalid VM workspace ID.".into());
-        }
-        let path = root.join(workspace);
         initialize_workspace(&path, *port)
             .map_err(|error| format!("Could not prepare the VM workspace. {error}"))?;
         Ok(Some(path))
     }
+
+    pub fn remove_vm_storage(&self, root: &Path) -> Result<(), String> {
+        let MachineConnection::Vm { workspace, .. } = &self.connection else {
+            return Ok(());
+        };
+        let Some(path) = vm_workspace(root, workspace.as_deref())? else {
+            return Ok(());
+        };
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)
+                .map_err(|error| format!("Could not remove the VM disk. {error}")),
+            Ok(_) => Err("Could not remove the VM disk. Workspace is not a directory.".into()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(format!("Could not inspect the VM disk. {error}")),
+        }
+    }
+}
+
+fn vm_workspace(root: &Path, workspace: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let Some(workspace) = workspace else {
+        return Ok(None);
+    };
+    if workspace.len() != 32 || !workspace.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Invalid VM workspace ID.".into());
+    }
+    Ok(Some(root.join(workspace)))
 }
 
 fn initialize_workspace(path: &Path, port: u16) -> io::Result<()> {
@@ -281,6 +303,11 @@ mod tests {
                 settings_json.to_string()
             );
         }
+        let first_storage = saved[2].vm_storage(&vm_root).unwrap().unwrap();
+        saved[2].remove_vm_storage(&vm_root).unwrap();
+        assert!(!first_storage.exists());
+        assert!(saved[3].vm_storage(&vm_root).unwrap().unwrap().exists());
+
         fs::remove_dir_all(root).unwrap();
     }
 }

@@ -102,6 +102,7 @@ mod ui {
             open_in_process,
             target_path.clone(),
         );
+        delegate.with(|controller| controller.machines.use_vm_data_directory(root.clone()));
         app.finishLaunching();
         let menu = delegate
             .ivars()
@@ -143,7 +144,7 @@ mod ui {
         assert!(remove.isEnabled());
         unsafe { remove.performClick(None) };
         assert_eq!(table.numberOfRows(), 0);
-        assert_eq!(std::fs::read(&vm_disk).unwrap(), b"guest data");
+        assert!(!vm_dir.exists(), "removing a VM deletes its disk files");
         let input = subviews
             .iter()
             .filter_map(|view| view.downcast::<NSTextField>().ok())
@@ -233,7 +234,7 @@ mod ui {
         panel.close();
         std::fs::remove_dir_all(root).unwrap();
         println!(
-            "Manage Machines removes saved profiles, preserves VM disk data, and clears the current target."
+            "Manage Machines removes saved profiles and VM disk data, and clears the current target."
         );
     }
 

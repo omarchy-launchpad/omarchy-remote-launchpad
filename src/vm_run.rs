@@ -142,6 +142,14 @@ impl VmRun {
         &self.message
     }
 
+    pub fn shutdown(mut self) -> Result<(), String> {
+        drop(self._input);
+        self.child
+            .wait()
+            .map_err(|error| format!("Could not stop the VM before removing its disk. {error}"))?;
+        Ok(())
+    }
+
     /// Returns whether the displayed status changed and whether the helper exited.
     pub fn poll(&mut self) -> (bool, bool) {
         let mut changed = false;
@@ -260,8 +268,7 @@ touch "$(dirname "$0")/shutdown"
 
         let shutdown = root.join("shutdown");
         assert!(!shutdown.exists());
-        drop(run._input);
-        assert!(run.child.wait().unwrap().success());
+        run.shutdown().unwrap();
         assert!(shutdown.is_file());
         fs::remove_dir_all(root).unwrap();
     }

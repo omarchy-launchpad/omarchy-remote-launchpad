@@ -17,6 +17,8 @@ Currently the only supported *client* is OSX with 2 modes of running
 - Remote: A preconfigured SSH enabled Omarchy instance (and sufficient access)
 - Virtual Machine: An Omarchy instance running locally on your Mac
 
+In **Manage Machines**, **Remove** stops the selected VM and deletes its disk files. If that VM was active, it also clears the current selection.
+
 ## On the Horizon
 
 - Windows Support

@@ -414,6 +414,21 @@ impl Machines {
             .active
             .as_ref()
             .is_some_and(|host| removed.matches(host));
+        if let MachineConnection::Vm { port, .. } = &removed.connection {
+            if let Some(runtime) = &mut self.runtime {
+                runtime.queued.remove(port);
+            }
+            if let Some(run) = self.vms.remove(port)
+                && let Err(error) = run.shutdown()
+            {
+                self.message(&error);
+                return false;
+            }
+            if let Err(error) = removed.remove_vm_storage(&self.vm_data_directory.join("VMs")) {
+                self.message(&error);
+                return false;
+            }
+        }
         let previous_target = match self.clear_target(&removed) {
             Ok(previous) => previous,
             Err(error) => {
@@ -434,11 +449,6 @@ impl Machines {
             return false;
         }
 
-        if let MachineConnection::Vm { port, .. } = removed.connection
-            && let Some(runtime) = &mut self.runtime
-        {
-            runtime.queued.remove(&port);
-        }
         self.table.reloadData();
         let count = self.table.numberOfRows() as usize;
         if count > 0 {
