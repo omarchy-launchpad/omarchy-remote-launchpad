@@ -8,8 +8,8 @@ int main(void) {
     if (!d) return 1;
     Window root = DefaultRootWindow(d);
     Window w = XCreateSimpleWindow(d, root, 0, 0, 96, 64, 0, 0, 0xff0000);
-    XStoreName(d, w, "Seams fixture");
-    XClassHint class = { "seams-fixture", "seams-fixture" };
+    XStoreName(d, w, "omarchy-launchpad fixture");
+    XClassHint class = { "omarchy-launchpad-fixture", "omarchy-launchpad-fixture" };
     XSetClassHint(d, w, &class);
     // Xvfb has no window manager to publish the desktop's client list.
     Atom clients = XInternAtom(d, "_NET_CLIENT_LIST", False);
@@ -37,7 +37,7 @@ int main(void) {
             XClearWindow(d, w);
             Window dialog = XCreateSimpleWindow(d, root, 120, 0, 96, 64, 0, 0, 0x0000ff);
             XSetTransientForHint(d, dialog, w);
-            XStoreName(d, dialog, "Seams dialog");
+            XStoreName(d, dialog, "omarchy-launchpad dialog");
             XSelectInput(d, dialog, ButtonPressMask);
             XMapWindow(d, dialog);
             XSetInputFocus(d, dialog, RevertToParent, CurrentTime);

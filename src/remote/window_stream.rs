@@ -1,5 +1,5 @@
 use super::Task;
-use omarchy_seams::{
+use omarchy_launchpad::{
     client::{self, Event},
     messages::{CAP_CAPTURE, CAP_INPUT, CAP_RESIZE, Input},
     protocol::MAX_PAYLOAD,
@@ -257,10 +257,6 @@ impl WindowStream {
     pub fn detach(&self) {
         // AppKit can retain the view after the viewer has closed.
         drop(self.connection.borrow_mut().take());
-    }
-
-    pub fn set_initial_viewport(&self, size: (f64, f64)) {
-        self.with_delivery(|delivery| delivery.viewport = size);
     }
 
     pub fn sync_controls(&self, size: (f64, f64), live_resize: bool) {

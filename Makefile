@@ -2,16 +2,16 @@
 build:
 	./scripts/build-macos
 run: build
-	open dist/Seams.app
+	open dist/omarchy-launchpad.app
 dev:
 	./scripts/dev-macos
 debug:
-	cargo build --locked --bin seams
-	rust-lldb target/debug/seams
+	cargo build --locked --bin omarchy-launchpad
+	rust-lldb target/debug/omarchy-launchpad
 test:
 	cargo test --locked
 check:
 	cargo fmt --check
 	cargo clippy --locked --all-targets -- -D warnings
 dmg: build
-	hdiutil create -volname AppSeams -srcfolder dist/Seams.app -ov -format UDZO dist/AppSeams.dmg
+	hdiutil create -volname omarchy-launchpad -srcfolder dist/omarchy-launchpad.app -ov -format UDZO dist/omarchy-launchpad.dmg

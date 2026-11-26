@@ -3,7 +3,9 @@
 set -eu
 cd "$(dirname "$0")/.."
 umask 077
-work=$(mktemp -d "${TMPDIR:-/tmp}/seams-native.XXXXXXXX")
+# OpenSSH appends a random suffix to ControlPath; keep it below macOS's
+# 104-byte Unix-domain socket limit even when TMPDIR itself is long.
+work=$(mktemp -d "${OMARCHY_LAUNCHPAD_TEST_TMPDIR:-/tmp}/olaunchpad.XXXXXXXX")
 container=
 cleanup() {
     if [ -n "$container" ]; then docker rm -f "$container" >/dev/null; fi
@@ -11,13 +13,13 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 1' INT TERM
-docker build -q -t seams-launch-fixture -f ../x11-bridge/scripts/Dockerfile.xvfb ../x11-bridge >/dev/null
+docker build -q -t omarchy-launchpad-launch-fixture -f ../x11-bridge/scripts/Dockerfile.xvfb ../x11-bridge >/dev/null
 ssh-keygen -q -t ed25519 -N '' -f "$work/client"
-container=$(docker run -d --rm -p 127.0.0.1::2222 --entrypoint sleep seams-launch-fixture 900)
+container=$(docker run -d --rm -p 127.0.0.1::2222 --entrypoint sleep omarchy-launchpad-launch-fixture 900)
 docker cp "$work/client.pub" "$container:/tmp/test-client.pub"
 docker cp tests/native/fixture.c "$container:/tmp/fixture.c"
 docker exec -i "$container" sh -eu <<'LINUX'
-cc /tmp/fixture.c -o /usr/local/bin/seams-fixture -lX11
+cc /tmp/fixture.c -o /usr/local/bin/omarchy-launchpad-fixture -lX11
 install -m755 /work/target/debug/x11-bridge-agent /usr/local/bin
 install -d -o bridge -g bridge -m700 /home/bridge/.ssh
 install -o bridge -g bridge -m600 /tmp/test-client.pub /home/bridge/.ssh/authorized_keys
@@ -28,11 +30,11 @@ ssh-keygen -q -t ed25519 -N '' -f /tmp/host
 cookie=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
 su bridge -c "touch ~/.Xauthority && chmod 600 ~/.Xauthority && xauth add :9 . $cookie"
 su bridge -c 'Xvfb :9 -auth "$HOME/.Xauthority" -nolisten tcp -screen 0 1024x768x24' >/tmp/xvfb.log 2>&1 &
-cat > /usr/share/applications/seams-fixture.desktop <<'ENTRY'
+cat > /usr/share/applications/omarchy-launchpad-fixture.desktop <<'ENTRY'
 [Desktop Entry]
 Type=Application
-Name=Seams smoke fixture
-Exec=/usr/local/bin/seams-fixture
+Name=omarchy-launchpad smoke fixture
+Exec=/usr/local/bin/omarchy-launchpad-fixture
 ENTRY
 /usr/sbin/sshd -p 2222 -h /tmp/host -o UsePAM=no -o PasswordAuthentication=no -o KbdInteractiveAuthentication=no -o AuthenticationMethods=publickey -o AllowUsers=bridge -o PermitRootLogin=no -o DisableForwarding=yes -o SetEnv=DISPLAY=:9
 LINUX
@@ -40,7 +42,7 @@ port=$(docker port "$container" 2222/tcp | cut -d: -f2)
 printf '[127.0.0.1]:%s ' "$port" > "$work/known_hosts"
 docker exec "$container" cat /tmp/host.pub >> "$work/known_hosts"
 cat > "$work/config" <<CONFIG
-Host seams-fixture
+Host omarchy-launchpad-fixture
     HostName 127.0.0.1
     User bridge
     Port $port
@@ -49,5 +51,10 @@ Host seams-fixture
     IdentityAgent none
     UserKnownHostsFile "$work/known_hosts"
     GlobalKnownHostsFile /dev/null
+    ProxyCommand /bin/sh -c 'test ! -e "$work/offline" && exec /usr/bin/nc %h %p'
 CONFIG
-SEAMS_FIXTURE_SSH_CONFIG="$work/config" cargo test --test native --locked
+printf '%s\n' omarchy-launchpad-fixture > "$work/target.local"
+OMARCHY_LAUNCHPAD_CONFIG="$work/target.local" \
+OMARCHY_LAUNCHPAD_FIXTURE_SSH_CONFIG="$work/config" \
+OMARCHY_LAUNCHPAD_FIXTURE_OUTAGE="$work/offline" \
+    cargo test --test native --locked

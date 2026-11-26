@@ -6,12 +6,12 @@ error_log="$PWD/errors.txt"
 (umask 077; touch "$error_log")
 exec 2> >(tee -a "$error_log" >&2)
 echo "Dev error log: $error_log"
-dev_dir=$(mktemp -d "${TMPDIR:-/tmp}/seams-dev.XXXXXX")
+dev_dir=$(mktemp -d "${TMPDIR:-/tmp}/omarchy-launchpad-dev.XXXXXX")
 reload_file="$dev_dir/reload"
 app_pid=
 
 fingerprint() {
-    { find src packaging ../x11-bridge/crates/protocol/src -type f -exec shasum {} +; shasum Cargo.toml Cargo.lock Makefile ../x11-bridge/Cargo.toml ../x11-bridge/crates/protocol/Cargo.toml; } |
+    { find src packaging ../x11-bridge/crates/protocol/src ../x11-bridge/crates/agent/src -type f -exec shasum {} +; shasum Cargo.toml Cargo.lock Makefile scripts/install-dev-agent ../x11-bridge/Cargo.toml ../x11-bridge/Cargo.lock ../x11-bridge/crates/protocol/Cargo.toml ../x11-bridge/crates/agent/Cargo.toml; } |
         LC_ALL=C sort | shasum
 }
 
@@ -39,14 +39,14 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 rebuild() {
-    if cargo build --locked --bin seams 2>&1 | tee "$dev_dir/build"; then
+    if { cargo build --locked --bin omarchy-launchpad && bash scripts/install-dev-agent; } 2>&1 | tee "$dev_dir/build"; then
         stop_client
-        RUST_BACKTRACE=1 SEAMS_DEV_RELOAD_FILE="$reload_file" target/debug/seams &
+        RUST_BACKTRACE=1 OMARCHY_LAUNCHPAD_DEV_RELOAD_FILE="$reload_file" target/debug/omarchy-launchpad &
         app_pid=$!
-        echo "Seams dev process $app_pid. Watching Rust sources and build inputs."
+        echo "omarchy-launchpad dev process $app_pid. Watching Rust sources and build inputs."
     else
-        { date -u '+[%Y-%m-%dT%H:%M:%SZ] cargo build failed'; cat "$dev_dir/build"; } >> "$error_log"
-        echo 'Build failed. Keeping previous app running; waiting for edits.' >&2
+        { date -u '+[%Y-%m-%dT%H:%M:%SZ] dev build or agent installation failed'; cat "$dev_dir/build"; } >> "$error_log"
+        echo 'Dev build or agent installation failed. Keeping previous app running; waiting for edits.' >&2
     fi
 }
 
@@ -55,7 +55,7 @@ rebuild
 while :; do
     sleep 1
     if [ -n "$app_pid" ] && ! kill -0 "$app_pid" 2>/dev/null; then
-        wait "$app_pid" || echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] Seams exited with status $?." >&2
+        wait "$app_pid" || echo "[$(date -u '+%Y-%m-%dT%H:%M:%SZ')] omarchy-launchpad exited with status $?." >&2
         app_pid=
     fi
     current=$(fingerprint)

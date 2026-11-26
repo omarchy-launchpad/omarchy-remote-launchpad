@@ -35,26 +35,29 @@ mod tests {
 
     #[test]
     fn subprocess_lock_probe() {
-        let Some(path) = std::env::var_os("SEAMS_TEST_INSTANCE_PATH") else {
+        let Some(path) = std::env::var_os("OMARCHY_LAUNCHPAD_TEST_INSTANCE_PATH") else {
             return;
         };
         let acquired = acquire(Path::new(&path)).unwrap().is_some();
         assert_eq!(
             acquired,
-            std::env::var("SEAMS_TEST_EXPECT_LOCK").unwrap() == "yes"
+            std::env::var("OMARCHY_LAUNCHPAD_TEST_EXPECT_LOCK").unwrap() == "yes"
         );
     }
 
     #[test]
     fn only_one_process_owns_lock_and_exit_releases_it() {
-        let dir = std::env::temp_dir().join(format!("seams-instance-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "omarchy-launchpad-instance-test-{}",
+            std::process::id()
+        ));
         let path = dir.join("instance.lock");
         let first = acquire(&path).unwrap().unwrap();
         let probe = |expected| {
             Command::new(std::env::current_exe().unwrap())
                 .args(["--exact", "instance::tests::subprocess_lock_probe"])
-                .env("SEAMS_TEST_INSTANCE_PATH", &path)
-                .env("SEAMS_TEST_EXPECT_LOCK", expected)
+                .env("OMARCHY_LAUNCHPAD_TEST_INSTANCE_PATH", &path)
+                .env("OMARCHY_LAUNCHPAD_TEST_EXPECT_LOCK", expected)
                 .output()
                 .unwrap()
                 .status

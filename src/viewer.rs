@@ -8,8 +8,12 @@ use objc2_app_kit::*;
 use objc2_foundation::{
     MainThreadMarker, NSNotification, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use omarchy_seams::{messages::Input, protocol::map_pointer};
+use omarchy_launchpad::{messages::Input, protocol::map_pointer};
 use std::cell::Cell;
+
+const DEFAULT_VIEWER_WIDTH: f64 = 960.;
+const DEFAULT_VIEWER_HEIGHT: f64 = 720.;
+const VIEWER_FRAME_NAME: &str = "omarchy-launchpad Viewer";
 
 struct ViewState {
     stream: WindowStream,
@@ -97,6 +101,12 @@ impl RemoteView {
         }
         if let Some((x, y)) = self.motion(e) {
             if let Some((button, pressed)) = button {
+                eprintln!(
+                    "[omarchy-launchpad-viewer] button={button} pressed={pressed} mapped=({x},{y}) window=({:.1},{:.1}) key={}",
+                    e.locationInWindow().x,
+                    e.locationInWindow().y,
+                    self.window().is_some_and(|window| window.isKeyWindow())
+                );
                 self.ivars().stream.send_input(vec![
                     Input::Motion { x, y },
                     Input::Button { button, pressed },
@@ -104,8 +114,13 @@ impl RemoteView {
             } else {
                 self.ivars().stream.pointer_motion(x, y);
             }
-        } else if matches!(button, Some((_, false))) {
-            self.release_inputs()
+        } else if let Some((button, pressed)) = button {
+            eprintln!(
+                "[omarchy-launchpad-viewer] button={button} pressed={pressed} ignored: pointer outside rendered frame"
+            );
+            if !pressed {
+                self.release_inputs()
+            }
         }
     }
     fn modifiers(&self, now: NSEventModifierFlags) {
@@ -194,8 +209,24 @@ impl Viewer {
         self.window.isVisible()
     }
 
+    pub fn is_minimized(&self) -> bool {
+        self.window.isMiniaturized()
+    }
+
+    pub fn restore(&self) {
+        self.window.deminiaturize(None);
+        self.present();
+    }
+
+    pub fn present(&self) {
+        self.window.makeKeyAndOrderFront(None);
+    }
+
     pub fn new(mtm: MainThreadMarker, stream: WindowStream) -> Self {
-        let frame = NSRect::new(NSPoint::ZERO, NSSize::new(640., 480.));
+        let frame = NSRect::new(
+            NSPoint::ZERO,
+            NSSize::new(DEFAULT_VIEWER_WIDTH, DEFAULT_VIEWER_HEIGHT),
+        );
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 NSWindow::alloc(mtm),
@@ -209,6 +240,11 @@ impl Viewer {
             )
         };
         unsafe { window.setReleasedWhenClosed(false) };
+        let frame_name = NSString::from_str(VIEWER_FRAME_NAME);
+        if !window.setFrameUsingName(&frame_name) {
+            window.center();
+        }
+        window.setFrameAutosaveName(&frame_name);
         let view: Retained<RemoteView> = unsafe {
             msg_send![super(RemoteView::alloc(mtm).set_ivars(ViewState{
             stream, flags: Cell::new(NSEventModifierFlags::empty())
@@ -229,7 +265,6 @@ impl Viewer {
     // Ok(false) detaches this local window.
     pub fn tick(&mut self) -> Result<bool, String> {
         let stream = &self.view.ivars().stream;
-        let first_frame = stream.frame_size() == (0, 0);
         let Some(update) = stream.poll()? else {
             return Ok(false);
         };
@@ -242,17 +277,9 @@ impl Viewer {
             self.view.setImage(None);
         }
         if let Some((w, h, pixels)) = update.frame {
-            if first_frame {
-                let fit = (960. / f64::from(w)).min(720. / f64::from(h)).min(1.);
-                self.window
-                    .setContentSize(NSSize::new(f64::from(w) * fit, f64::from(h) * fit));
-                self.window.center();
-                let size = self.view.bounds().size;
-                stream.set_initial_viewport((size.width, size.height));
-            }
             self.view.setImage(Some(&*bitmap(w, h, &pixels)?));
             if self.hidden {
-                self.window.makeKeyAndOrderFront(None);
+                self.present();
                 self.hidden = false;
             }
         }

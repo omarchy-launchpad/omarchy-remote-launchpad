@@ -3,8 +3,18 @@ set -eu
 cd "$(dirname "$0")/.."
 export MACOSX_DEPLOYMENT_TARGET=13.0
 cargo build --release --locked
-mkdir -p dist/Seams.app/Contents/MacOS
-cp target/release/seams dist/Seams.app/Contents/MacOS/seams
-cp packaging/Info.plist dist/Seams.app/Contents/Info.plist
-codesign --force --sign - dist/Seams.app
-echo "Built dist/Seams.app (local ad-hoc signature)."
+contents=dist/omarchy-launchpad.app/Contents
+mkdir -p "$contents/MacOS" "$contents/Resources"
+install -m 755 scripts/local-vm scripts/install-vm-runtime "$contents/Resources"
+if [ -n "${OMARCHY_LAUNCHPAD_LINUX_AGENTS:-}" ]; then
+    COPYFILE_DISABLE=1 tar -C "$OMARCHY_LAUNCHPAD_LINUX_AGENTS" --no-xattrs \
+        -cf "$contents/Resources/linux-agents.tar" x11-bridge-agent-aarch64 x11-bridge-agent-x86_64
+else
+    rm -f "$contents/Resources/linux-agents.tar"
+fi
+cp target/release/omarchy-launchpad dist/omarchy-launchpad.app/Contents/MacOS/omarchy-launchpad
+cp packaging/Info.plist dist/omarchy-launchpad.app/Contents/Info.plist
+version=$(awk -F ' *= *' '/^version *=/ { gsub(/^"|"$/, "", $2); print $2; exit }' Cargo.toml)
+plutil -replace CFBundleShortVersionString -string "$version" dist/omarchy-launchpad.app/Contents/Info.plist
+codesign --force --sign - dist/omarchy-launchpad.app
+echo "Built dist/omarchy-launchpad.app (local ad-hoc signature)."

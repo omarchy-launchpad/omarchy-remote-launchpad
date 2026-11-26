@@ -27,5 +27,7 @@ __pycache__/
 *.pyc
 dist/
 
-/seams.local
+/omarchy-launchpad.local
 /errors.txt
+
+/omarchy-launchpad.machines.json

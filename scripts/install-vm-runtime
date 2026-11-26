@@ -1,0 +1,61 @@
+#!/bin/sh
+# Cache the signed Try Omarchy runtime without installing an app in Applications.
+set -eu
+umask 077
+
+if [ "${1:-}" != '--locked' ]; then
+    mkdir -p "$1"
+    exec /usr/bin/lockf -k -t 300 "$1/.install.lock" /bin/sh "$0" --locked "$1"
+fi
+
+cache=$2
+app="$cache/Try Omarchy v1.4.1.app"
+helper='Contents/MacOS/omarchy-vm-helper'
+digest='0eb828a5577830a270be5781c6bd5f78220632f35b13fcff4f3af807c3445cc8'
+download='https://github.com/omacom/try-omarchy/releases/download/v1.4.1/TryOmarchy.dmg'
+requirement='identifier "dev.tryomarchy.native" and anchor apple generic and certificate leaf[subject.OU] = "RZC79MPD34"'
+
+verify() {
+    [ -x "$1/$helper" ] &&
+        /usr/bin/codesign --verify --deep --strict -R="$requirement" "$1" 2>/dev/null
+}
+
+if verify "$app"; then
+    printf '%s\n' "$app/$helper"
+    exit
+fi
+
+stage=$(/usr/bin/mktemp -d "$cache/.download.XXXXXXXX")
+mounted=
+cleanup() {
+    if [ -n "$mounted" ]; then
+        /usr/bin/hdiutil detach "$stage/mount" -quiet ||
+            /usr/bin/hdiutil detach "$stage/mount" -quiet -force || return
+    fi
+    /bin/rm -rf "$stage"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+/usr/bin/curl --proto '=https' --proto-redir '=https' --fail --silent --show-error \
+    --location --retry 2 --connect-timeout 15 --max-time 180 --max-filesize 20000000 \
+    --output "$stage/TryOmarchy.dmg" "$download" ||
+    { echo 'Could not download the Omarchy runtime. Try opening the VM again.' >&2; exit 1; }
+if ! (cd "$stage" && printf '%s  TryOmarchy.dmg\n' "$digest" | /usr/bin/shasum -a 256 -c - >/dev/null); then
+    echo 'The Omarchy runtime download failed its checksum check.' >&2
+    exit 1
+fi
+/bin/mkdir "$stage/mount"
+/usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -quiet \
+    -mountpoint "$stage/mount" "$stage/TryOmarchy.dmg"
+mounted=1
+/usr/bin/ditto "$stage/mount/Try Omarchy.app" "$stage/Try Omarchy.app"
+if ! verify "$stage/Try Omarchy.app"; then
+    echo 'The downloaded Omarchy runtime could not be verified.' >&2
+    exit 1
+fi
+if [ -e "$app" ] || [ -L "$app" ]; then
+    /bin/mv "$app" "$stage/unverified.app"
+fi
+/bin/mv "$stage/Try Omarchy.app" "$app"
+printf '%s\n' "$app/$helper"

@@ -1,7 +1,8 @@
 #!/bin/bash
-# Connect Seams to the signed Try Omarchy runtime on an Apple silicon Mac.
+# Connect Launchpad to the signed Try Omarchy runtime on an Apple silicon Mac.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+script_dir=$(cd "$(dirname "$0")" && pwd)
+cd "$script_dir/.."
 umask 077
 
 fail() { echo "$*" >&2; exit 1; }
@@ -11,13 +12,18 @@ fail() { echo "$*" >&2; exit 1; }
 case ${1:-} in
     start)
         exec open -b dev.tryomarchy.native ;;
-    setup|status) ;;
+    setup|status|provision) ;;
     *) fail "Usage: scripts/local-vm start | {setup|status} USER [SSH_PORT]" ;;
 esac
 
 user=${2:-}
 port=${3:-2222}
-[[ $# -ge 2 && $# -le 3 && $user =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] ||
+if [[ $1 == provision ]]; then
+    [[ $# -eq 4 && -x $4 ]] || fail "Launch VM setup from Manage Machines."
+else
+    [[ $# -ge 2 && $# -le 3 ]] || fail "Supply the desktop account created in Omarchy."
+fi
+[[ $user =~ ^[a-zA-Z0-9_][a-zA-Z0-9_.-]*$ ]] ||
     fail "Supply the desktop account created in Omarchy."
 [[ $port =~ ^[0-9]{1,5}$ ]] && ((10#$port > 0 && 10#$port <= 65535)) ||
     fail "SSH port must be between 1 and 65535."
@@ -41,16 +47,25 @@ ssh-copy-id -i "$keys/client.pub" "${opts[@]}" -o StrictHostKeyChecking=ask "$gu
 ssh_vm=(ssh "${opts[@]}" -i "$keys/client" -o StrictHostKeyChecking=yes -o BatchMode=yes)
 "${ssh_vm[@]}" "$guest" 'test "$(uname -m)" = aarch64' ||
     fail "Check the SSH port and account for the ARM64 Omarchy VM."
-# Build the same sibling sources used by the Mac client.
-"${ssh_vm[@]}" -t "$guest" 'cargo --version && command -v cc || sudo pacman -S --needed rust gcc'
-COPYFILE_DISABLE=1 tar -C ../x11-bridge --no-xattrs --exclude=.DS_Store -cf - Cargo.toml Cargo.lock crates |
-    "${ssh_vm[@]}" "$guest" 'set -eu
-        build=$(mktemp -d); trap '\''rm -rf "$build"'\'' EXIT
-        cd "$build"; tar xf -; cargo build --release --locked -p x11-bridge-agent
-        mkdir -p ~/.local/bin
-        tmp=$(mktemp ~/.local/bin/.seams-agent.XXXXXX)
-        install -m755 target/release/x11-bridge-agent "$tmp"
-        mv "$tmp" ~/.local/bin/x11-bridge-agent'
+if [[ $1 == provision && -f $script_dir/linux-agents.tar ]]; then
+    "$4" --install-agent "$target"
+else
+    # A source checkout builds the agent on the guest.
+    if [[ ! -f ../x11-bridge/Cargo.toml ]]; then
+        cd "$script_dir/../../../.."
+    fi
+    [[ -f ../x11-bridge/Cargo.toml ]] ||
+        fail "Use a release build with the bundled agent or build from a checkout next to x11-bridge."
+    "${ssh_vm[@]}" -t "$guest" 'cargo --version && command -v cc || sudo pacman -S --needed rust gcc'
+    COPYFILE_DISABLE=1 tar -C ../x11-bridge --no-xattrs --exclude=.DS_Store -cf - Cargo.toml Cargo.lock crates |
+        "${ssh_vm[@]}" "$guest" 'set -eu
+            build=$(mktemp -d); trap '\''rm -rf "$build"'\'' EXIT
+            cd "$build"; tar xf -; cargo build --release --locked -p x11-bridge-agent
+            mkdir -p ~/.local/bin
+            tmp=$(mktemp ~/.local/bin/.seams-agent.XXXXXX)
+            install -m755 target/release/x11-bridge-agent "$tmp"
+            mv "$tmp" ~/.local/bin/x11-bridge-agent'
+fi
 "${ssh_vm[@]}" -t "$guest" 'command -v xdpyinfo || sudo pacman -S --needed xorg-xdpyinfo'
 # Match Xwayland pixels to Hyprland's logical resize coordinates on Retina displays.
 "${ssh_vm[@]}" "$guest" sh -s <<'GUEST'
@@ -64,5 +79,10 @@ systemd-run --user --wait --pipe --quiet hyprctl eval "$setting" | grep -qx ok
     grep -Fxq "$setting" "$config" || printf '\n%s\n' "$setting" >&9
 ) 9>>"$config"
 GUEST
-cargo run --quiet --locked -- --select-target "$target"
-echo 'Open Seams or press Refresh in Launchpad.'
+if [[ $1 == provision ]]; then
+    "$4" --check-target "$target"
+    echo 'Return to Manage Machines and click Connect.'
+else
+    cargo run --quiet --locked -- --select-target "$target"
+    echo 'Open Launchpad or press Refresh.'
+fi

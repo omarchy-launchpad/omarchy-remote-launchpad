@@ -1,0 +1,53 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+if [[ $# -eq 0 ]]; then
+    config=${OMARCHY_LAUNCHPAD_CONFIG:-"$PWD/omarchy-launchpad.local"}
+    if [[ -z ${OMARCHY_LAUNCHPAD_CONFIG:-} && ! -f $config ]]; then
+        config="$HOME/Library/Application Support/omarchy-launchpad/omarchy-launchpad.local"
+    fi
+    [[ -f $config ]] || exit 0
+    host=$(cat "$config")
+    host=$(printf '%s' "$host" | awk '{$1=$1; print}')
+    [[ -n $host ]] || exit 0
+    [[ $host == vm://* ]] && exit 0  # The VM setup flow installs its own agent.
+elif [[ $# -eq 1 ]]; then
+    host=$1
+else
+    echo "Usage: scripts/install-dev-agent [SSH_DESTINATION]" >&2
+    exit 1
+fi
+if [[ ! "$host" =~ ^([[:alnum:]_.:-]+@)?[[:alnum:]_.:-]+$ || "$host" == -* || "$host" == @* || "$host" == *@-* ]]; then
+    echo "Invalid SSH destination." >&2
+    exit 1
+fi
+ssh_options=(-T -x -oBatchMode=yes -oStrictHostKeyChecking=yes -oConnectTimeout=8)
+arch=$(/usr/bin/ssh "${ssh_options[@]}" -- "$host" 'uname -m')
+case "$arch" in
+    x86_64) platform=linux/amd64; agent_target=target/linux-agent ;;
+    aarch64) platform=linux/arm64; agent_target=target/linux-agent-arm64 ;;
+    *) echo "The bridge agent build supports ARM64 and x86-64 Linux. Remote architecture is $arch." >&2; exit 1 ;;
+esac
+
+if ! command -v docker >/dev/null && [[ -x /Applications/Docker.app/Contents/Resources/bin/docker ]]; then
+    export PATH="/Applications/Docker.app/Contents/Resources/bin:$PATH"
+fi
+command -v docker >/dev/null || { echo "Start Docker to build the bridge agent from source." >&2; exit 1; }
+docker run --rm --platform "$platform" \
+    -v "$PWD/../x11-bridge:/work" -w /work -e "CARGO_TARGET_DIR=/work/$agent_target" rust:1-alpine \
+    sh -c 'apk add --no-cache musl-dev >/dev/null && cargo build --release --locked -p x11-bridge-agent'
+agent=../x11-bridge/$agent_target/release/x11-bridge-agent
+digest=$(shasum -a 256 "$agent" | awk '{print $1}')
+/usr/bin/ssh "${ssh_options[@]}" -- "$host" "sh -s -- $digest" < <(
+    printf '%s\n' 'set -eu' 'expected=$1' \
+        'dir="$HOME/.local/bin"' 'mkdir -p "$dir"' \
+        'tmp=$(mktemp "$dir/.x11-bridge-agent.XXXXXX")' \
+        'trap '\''rm -f "$tmp"'\'' EXIT HUP INT TERM' \
+        'base64 -d > "$tmp" <<'\''AGENT_DATA'\'''
+    base64 < "$agent"
+    printf '\n%s\n' 'AGENT_DATA' \
+        '[ "$(sha256sum "$tmp" | cut -d " " -f 1)" = "$expected" ] || { echo "Agent checksum mismatch" >&2; exit 1; }' \
+        'chmod 755 "$tmp"' 'mv -f "$tmp" "$dir/x11-bridge-agent"'
+)
+echo "Installed Linux agent on $host."

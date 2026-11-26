@@ -1,5 +1,5 @@
 [package]
-name = "omarchy-seams"
+name = "omarchy-launchpad"
 version = "0.1.0"
 edition = "2024"
 description = "Native macOS launcher for seamless remote X11 applications over SSH"
@@ -9,13 +9,17 @@ license = "MIT"
 x11-bridge-protocol = { path = "../x11-bridge/crates/protocol" }
 
 [[bin]]
-name = "seams"
+name = "omarchy-launchpad"
 path = "src/main.rs"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+gliff-proto = { git = "https://github.com/omacom/gliff.git", rev = "9d93732ae3fd4319e071feeecf38ab2cfc19edfc" }
+minicbor = { version = "2", features = ["alloc"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 objc2 = "0.6.5"
-objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSString", "NSGeometry", "NSTimer", "NSIndexSet", "NSRunLoop", "NSDate", "NSURL", "NSArray", "NSNotification", "NSDistributedNotificationCenter"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSResponder", "NSWindow", "NSView", "NSControl", "NSTextField", "NSButton", "NSRunningApplication", "NSBox", "NSAppearance", "NSParagraphStyle", "NSScroller", "NSTableCellView", "NSTableRowView", "NSMenu", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSMenuItem", "NSScrollView", "NSTextView", "NSText", "NSFont", "NSFontDescriptor", "NSGraphics", "objc2-core-foundation", "NSColor", "NSEvent", "NSGraphicsContext", "NSBitmapImageRep", "NSImageRep", "NSImage", "NSImageView", "NSCell", "NSTableView", "NSTableColumn", "NSTableHeaderView", "NSUserInterfaceItemIdentification"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSObject", "NSProcessInfo", "NSString", "NSGeometry", "NSTimer", "NSIndexSet", "NSRunLoop", "NSDate", "NSURL", "NSArray", "NSNotification", "NSDistributedNotificationCenter", "NSData"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSAccessibilityProtocols", "NSAlert", "NSResponder", "NSWindow", "NSView", "NSControl", "NSTextField", "NSSecureTextField", "NSButton", "NSRunningApplication", "NSBox", "NSAppearance", "NSParagraphStyle", "NSScroller", "NSTableCellView", "NSTableRowView", "NSMenu", "NSStatusBar", "NSStatusItem", "NSStatusBarButton", "NSMenuItem", "NSScrollView", "NSTextView", "NSText", "NSFont", "NSFontDescriptor", "NSGraphics", "objc2-core-foundation", "NSColor", "NSEvent", "NSGraphicsContext", "NSBitmapImageRep", "NSImageRep", "NSImage", "NSImageView", "NSCell", "NSTableView", "NSTableColumn", "NSTableHeaderView", "NSUserInterfaceItemIdentification"] }
 
 [[test]]
 name = "native"

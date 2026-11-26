@@ -1,5 +1,6 @@
 use crate::{
     config::Host,
+    dock_apps::icon_image,
     remote::{self, App, Task},
 };
 use objc2::{
@@ -12,9 +13,12 @@ use objc2_app_kit::*;
 use objc2_foundation::{
     MainThreadMarker, NSIndexSet, NSObject, NSObjectProtocol, NSPoint, NSRect, NSSize, NSString,
 };
-use std::cell::RefCell;
+use std::{
+    cell::RefCell,
+    time::{Duration, Instant},
+};
 
-fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
+pub(crate) fn rect(x: f64, y: f64, w: f64, h: f64) -> NSRect {
     NSRect::new(NSPoint::new(x, y), NSSize::new(w, h))
 }
 const WIDTH: f64 = 340.;
@@ -25,17 +29,17 @@ const ROW_HEIGHT: f64 = 40.;
 
 const PANEL: u32 = 0x1d1f29;
 const BORDER: u32 = 0x3a3f5b;
-const SELECTION: u32 = 0x272936;
-const TEXT: u32 = 0xb5bfe2;
-const MUTED: u32 = 0x969fc2;
-const GREEN: u32 = 0x9dbb61;
+pub(crate) const SELECTION: u32 = 0x272936;
+pub(crate) const TEXT: u32 = 0xb5bfe2;
+pub(crate) const MUTED: u32 = 0x969fc2;
+pub(crate) const GREEN: u32 = 0x9dbb61;
 
-fn color(rgb: u32) -> Retained<NSColor> {
+pub(crate) fn color(rgb: u32) -> Retained<NSColor> {
     let channel = |shift: u32| ((rgb >> shift) & 255) as f64 / 255.;
     NSColor::colorWithSRGBRed_green_blue_alpha(channel(16), channel(8), channel(0), 1.)
 }
 
-fn mono(size: f64) -> Retained<NSFont> {
+pub(crate) fn mono(size: f64) -> Retained<NSFont> {
     NSFont::fontWithName_size(&NSString::from_str("Iosevka"), size)
         .unwrap_or_else(|| NSFont::monospacedSystemFontOfSize_weight(size, 0.))
 }
@@ -84,7 +88,9 @@ fn tint_cell(row: &NSTableRowView) {
         if let Some(label) = unsafe { cell.textField() } {
             label.setTextColor(Some(&color(if selected { GREEN } else { TEXT })));
         }
-        if let Some(icon) = unsafe { cell.imageView() } {
+        if let Some(icon) = unsafe { cell.imageView() }
+            && icon.image().is_some_and(|image| image.isTemplate())
+        {
             icon.setContentTintColor(Some(&color(if selected { GREEN } else { MUTED })));
         }
     }
@@ -124,11 +130,14 @@ fn app_row(mtm: MainThreadMarker, app: &App) -> Retained<NSView> {
         rect(0., 0., LIST_WIDTH, ROW_HEIGHT),
     );
     let icon = NSImageView::initWithFrame(NSImageView::alloc(mtm), rect(12., 12., 16., 16.));
-    let symbol = NSImage::imageWithSystemSymbolName_accessibilityDescription(
-        &NSString::from_str("square.on.square"),
-        None,
-    );
-    icon.setImage(symbol.as_deref());
+    let image = app.icon.as_deref().and_then(icon_image).or_else(|| {
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(
+            &NSString::from_str("square.on.square"),
+            None,
+        )
+    });
+    icon.setImageScaling(NSImageScaling::ScaleProportionallyDown);
+    icon.setImage(image.as_deref());
     let name = NSTextField::labelWithString(&NSString::from_str(&app.name), mtm);
     name.setFont(Some(&mono(14.)));
     name.setUsesSingleLineMode(true);
@@ -149,7 +158,7 @@ fn app_row(mtm: MainThreadMarker, app: &App) -> Retained<NSView> {
     cell.into_super()
 }
 
-fn button(
+pub(crate) fn button(
     mtm: MainThreadMarker,
     title: &str,
     target: &AnyObject,
@@ -171,6 +180,32 @@ fn button(
     button
 }
 
+pub(crate) fn panel(mtm: MainThreadMarker, frame: NSRect, title: &str) -> Retained<NSWindow> {
+    let window: Retained<LaunchpadWindow> = unsafe {
+        msg_send![LaunchpadWindow::alloc(mtm), initWithContentRect: frame,
+            styleMask: NSWindowStyleMask::Borderless, backing: NSBackingStoreType::Buffered, defer: false]
+    };
+    let window = window.into_super();
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setTitle(&NSString::from_str(title));
+    window.setAppearance(
+        NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref(),
+    );
+    window.setBackgroundColor(Some(&color(PANEL)));
+    window.setHasShadow(true);
+    window.setMovableByWindowBackground(true);
+    window.center();
+    let border = NSBox::initWithFrame(NSBox::alloc(mtm), frame);
+    border.setBoxType(NSBoxType::Custom);
+    border.setTitlePosition(NSTitlePosition::NoTitle);
+    border.setCornerRadius(0.);
+    border.setBorderWidth(2.);
+    border.setBorderColor(&color(BORDER));
+    border.setFillColor(&color(PANEL));
+    window.contentView().unwrap().addSubview(&border);
+    window
+}
+
 pub struct Launcher {
     pub window: Retained<NSWindow>,
     pub host: Option<Host>,
@@ -181,38 +216,15 @@ pub struct Launcher {
     rows: Retained<Rows>,
     status: Retained<NSTextField>,
     task: Option<Task<Vec<App>>>,
+    icons: Option<(Instant, Task<remote::Icons>)>,
     apps: Vec<App>,
     query: String,
 }
 impl Launcher {
     pub fn new(mtm: MainThreadMarker, target: &AnyObject) -> Self {
         let frame = rect(0., 0., WIDTH, HEIGHT);
-        let window: Retained<LaunchpadWindow> = unsafe {
-            msg_send![LaunchpadWindow::alloc(mtm), initWithContentRect: frame,
-                styleMask: NSWindowStyleMask::Borderless, backing: NSBackingStoreType::Buffered, defer: false]
-        };
-        let window = window.into_super();
-        unsafe {
-            window.setReleasedWhenClosed(false);
-        }
-        window.setTitle(&NSString::from_str("Seams Launchpad"));
-        window.setAppearance(
-            NSAppearance::appearanceNamed(unsafe { NSAppearanceNameDarkAqua }).as_deref(),
-        );
-        window.setBackgroundColor(Some(&color(PANEL)));
-        window.setHasShadow(true);
-        window.setMovableByWindowBackground(true);
-        window.center();
-
+        let window = panel(mtm, frame, "omarchy-launchpad");
         let v = window.contentView().unwrap();
-        let border = NSBox::initWithFrame(NSBox::alloc(mtm), frame);
-        border.setBoxType(NSBoxType::Custom);
-        border.setTitlePosition(NSTitlePosition::NoTitle);
-        border.setCornerRadius(0.);
-        border.setBorderWidth(2.);
-        border.setBorderColor(&color(BORDER));
-        border.setFillColor(&color(PANEL));
-        v.addSubview(&border);
 
         let search =
             NSTextField::initWithFrame(NSTextField::alloc(mtm), rect(INSET - 2., 491., 145., 22.));
@@ -271,7 +283,7 @@ impl Launcher {
         );
         status.setFont(Some(&mono(12.)));
         status.setTextColor(Some(&color(MUTED)));
-        status.setFrame(rect(INSET - 2., 7., 169., 35.));
+        status.setFrame(rect(INSET - 2., 7., 125., 35.));
         let open = button(
             mtm,
             "Launch",
@@ -288,6 +300,14 @@ impl Launcher {
             rect(200., 18., 60., 28.),
         );
         refresh.setToolTip(Some(&NSString::from_str("Refresh apps")));
+        let lock = button(
+            mtm,
+            "Lock",
+            target,
+            sel!(lockOmarchy:),
+            rect(147., 18., 48., 28.),
+        );
+        lock.setToolTip(Some(&NSString::from_str("Lock Omarchy")));
         let close = button(
             mtm,
             "×",
@@ -299,6 +319,7 @@ impl Launcher {
         close.setKeyEquivalent(&NSString::from_str("\u{1b}"));
         close.setToolTip(Some(&NSString::from_str("Close launchpad")));
         v.addSubview(&close);
+        v.addSubview(&lock);
         v.addSubview(&refresh);
         open.setEnabled(false);
         v.addSubview(&search);
@@ -306,9 +327,6 @@ impl Launcher {
         v.addSubview(&status);
         v.addSubview(&open);
         window.makeFirstResponder(Some(&search));
-        window.makeKeyAndOrderFront(None);
-        #[allow(deprecated)]
-        NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
         Self {
             window,
             host: None,
@@ -319,26 +337,34 @@ impl Launcher {
             rows,
             status,
             task: None,
+            icons: None,
             apps: Vec::new(),
             query: String::new(),
         }
     }
-    pub fn refresh(&mut self, host: Result<Host, String>) {
+    pub fn clear_apps(&mut self, message: &str) {
         self.task = None;
-        self.host = None;
+        self.icons = None;
         self.apps.clear();
         self.filter();
-        self.host_label.setStringValue(&NSString::from_str(""));
-        self.host_label.setToolTip(None);
-        match host.and_then(|h| {
-            self.host_label
-                .setStringValue(&NSString::from_str(h.name()));
-            self.host_label
-                .setToolTip(Some(&NSString::from_str(h.name())));
-            let task = remote::catalogue(&h)?;
-            self.host = Some(h);
-            Ok(task)
-        }) {
+        self.set_status(message);
+    }
+    pub fn configure(&mut self, host: Result<Host, String>) {
+        self.host = None;
+        self.clear_apps("Checking connection…");
+        let name = NSString::from_str(host.as_ref().map_or("", |h| h.name()));
+        self.host_label.setStringValue(&name);
+        self.host_label.setToolTip(Some(&name));
+        match host {
+            Ok(host) => self.host = Some(host),
+            Err(e) => self.error(&e),
+        }
+    }
+    pub fn load_apps(&mut self) {
+        let Some(host) = &self.host else {
+            return;
+        };
+        match remote::catalogue(host) {
             Ok(task) => {
                 self.task = Some(task);
                 self.set_status("Reading installed apps…");
@@ -370,12 +396,33 @@ impl Launcher {
             match result {
                 Ok(apps) => {
                     self.apps = apps;
-                    self.filter()
+                    self.icons = self
+                        .host
+                        .as_ref()
+                        .filter(|_| !self.apps.is_empty())
+                        .and_then(|host| remote::icons(host, &self.apps).ok())
+                        .map(|task| (Instant::now() + Duration::from_secs(3), task));
+                    if self.icons.is_none() {
+                        self.filter();
+                    }
                 }
                 Err(e) => self.error(&e),
             }
+        }
+        if let Some((deadline, task)) = &self.icons {
+            let result = task.poll();
+            if result.is_none() && Instant::now() < *deadline {
+                return;
+            }
+            self.icons = None;
+            if let Some(Ok(mut icons)) = result {
+                for app in &mut self.apps {
+                    app.icon = icons.remove(&app.id);
+                }
+            }
+            self.filter();
         } else if !self.apps.is_empty() && self.query != self.search.stringValue().to_string() {
-            self.filter()
+            self.filter();
         }
     }
     fn filter(&mut self) {
@@ -414,7 +461,7 @@ impl Launcher {
             .cloned()
     }
     pub fn error(&self, message: &str) {
-        eprintln!("Seams: {message}");
+        eprintln!("omarchy-launchpad: {message}");
         self.set_status(message);
     }
 

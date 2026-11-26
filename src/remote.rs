@@ -3,15 +3,16 @@ use crate::config::Host;
 #[path = "remote/window_stream.rs"]
 mod window_stream;
 use std::{
+    collections::HashMap,
     fs::File,
-    io::{self, BufRead, BufReader, Read},
+    io::{self, BufRead, BufReader, Read, Write},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
     sync::{
         Arc, Mutex,
         mpsc::{self, Receiver},
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 pub use window_stream::WindowStream;
 
@@ -25,19 +26,19 @@ fn ssh(p: &Host, args: &[&str]) -> Command {
     let mut cmd = p.ssh_command();
     let mut remote = match p {
         Host::Ssh(_) => String::from(
-            r#"agent=$(command -v x11-bridge-agent) || agent="$HOME/.local/bin/x11-bridge-agent"
+            r#"agent="$HOME/.local/bin/x11-bridge-agent"; [ -x "$agent" ] || agent=$(command -v x11-bridge-agent)
 [ -x "$agent" ] || { echo 'Install the current x11-bridge-agent in ~/.local/bin on Linux.' >&2; exit 1; }
 "#,
         ),
         Host::LocalVm { .. } => String::from(
             r#"agent="$HOME/.local/bin/x11-bridge-agent"
-[ -x "$agent" ] || { echo 'Run scripts/local-vm setup to install the agent.' >&2; exit 1; }
+[ -x "$agent" ] || { echo 'Use Set up access in Manage Machines to install the bridge agent.' >&2; exit 1; }
 "#,
         ),
     };
     if matches!(p, Host::LocalVm { .. }) && args == ["list"] {
         remote.push_str(r#"extensions=$(systemd-run --user --pipe --wait --quiet xdpyinfo -queryExtensions) || {
-    echo 'Log in to the Omarchy desktop and retry Refresh.' >&2
+    echo 'Log in to the Omarchy desktop and try again.' >&2
     exit 1
 }
 for ext in Composite DAMAGE X-Resource XTEST; do
@@ -61,7 +62,7 @@ pub struct Task<T> {
 }
 
 impl<T: Send + 'static> Task<T> {
-    fn spawn(
+    pub(crate) fn spawn(
         mut cmd: Command,
         work: impl FnOnce(ChildStdout, ChildStdin) -> io::Result<T> + Send + 'static,
     ) -> Result<Self, String> {
@@ -85,7 +86,9 @@ impl<T: Send + 'static> Task<T> {
                     if n == 0 {
                         break;
                     }
-                    tail.extend_from_slice(&buf[..n]);
+                    let chunk = &buf[..n];
+                    eprint!("{}", String::from_utf8_lossy(chunk));
+                    tail.extend_from_slice(chunk);
                     if tail.len() > 4096 {
                         tail.drain(..tail.len() - 4096);
                     }
@@ -136,10 +139,68 @@ impl<T> Drop for Task<T> {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Connection {
+    Checking,
+    Online,
+    Offline,
+}
+
+pub struct Reachability {
+    state: Connection,
+    probe: Option<(Instant, Task<()>)>,
+    next_probe: Instant,
+}
+
+impl Reachability {
+    pub fn new() -> Self {
+        Self {
+            state: Connection::Checking,
+            probe: None,
+            next_probe: Instant::now(),
+        }
+    }
+
+    pub fn state(&self) -> Connection {
+        self.state
+    }
+
+    pub fn tick(&mut self, host: &Host) -> Connection {
+        const INTERVAL: Duration = Duration::from_secs(5);
+        const TIMEOUT: Duration = Duration::from_secs(3);
+        let now = Instant::now();
+        if let Some((started, task)) = &self.probe {
+            if now - *started >= TIMEOUT {
+                self.probe = None;
+                self.state = Connection::Offline;
+            } else if let Some(result) = task.poll() {
+                self.probe = None;
+                self.state = if result.is_ok() {
+                    Connection::Online
+                } else {
+                    Connection::Offline
+                };
+            }
+        }
+        if self.probe.is_none() && now >= self.next_probe {
+            self.next_probe = now + INTERVAL;
+            match Task::spawn(host.reachability_command(), |mut out, _in| {
+                io::copy(&mut out, &mut io::sink())?;
+                Ok(())
+            }) {
+                Ok(task) => self.probe = Some((now, task)),
+                Err(_) => self.state = Connection::Offline,
+            }
+        }
+        self.state
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct App {
     pub id: String,
     pub name: String,
+    pub icon: Option<Arc<[u8]>>,
 }
 
 fn read_apps(input: impl Read) -> io::Result<Vec<App>> {
@@ -163,6 +224,7 @@ fn read_apps(input: impl Read) -> io::Result<Vec<App>> {
             Ok(App {
                 id: id.into(),
                 name: name.into(),
+                icon: None,
             })
         })
         .collect()
@@ -170,6 +232,130 @@ fn read_apps(input: impl Read) -> io::Result<Vec<App>> {
 
 pub fn catalogue(p: &Host) -> Result<Task<Vec<App>>, String> {
     Task::spawn(ssh(p, &["list"]), |stdout, _stdin| read_apps(stdout))
+}
+
+pub fn resource(name: &str) -> Option<std::path::PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    let path = executable.parent()?.join("../Resources").join(name);
+    path.is_file().then_some(path)
+}
+
+pub fn agent_archive() -> Option<std::path::PathBuf> {
+    resource("linux-agents.tar")
+}
+
+fn source_agent_installer() -> Option<std::path::PathBuf> {
+    let executable = std::env::current_exe().ok()?;
+    executable.ancestors().find_map(|directory| {
+        let script = directory.join("scripts/install-dev-agent");
+        (script.is_file() && directory.join("../x11-bridge/Cargo.toml").is_file()).then_some(script)
+    })
+}
+
+pub fn can_install_agent() -> bool {
+    agent_archive().is_some() || source_agent_installer().is_some()
+}
+
+pub fn install_agent(host: &Host) -> Result<Task<()>, String> {
+    let Some(path) = agent_archive() else {
+        if let Host::Ssh(destination) = host
+            && let Some(installer) = source_agent_installer()
+        {
+            let mut command = Command::new("/bin/bash");
+            command.arg(installer).arg(destination);
+            return Task::spawn(command, |mut stdout, _stdin| {
+                io::copy(&mut stdout, &mut io::sink()).map(|_| ())
+            });
+        }
+        return Err("Use a release build to install the bridge agent from Launchpad.".into());
+    };
+    let mut archive = File::open(path).map_err(|error| error.to_string())?;
+    let mut command = host.ssh_command();
+    command.arg(
+        r#"set -eu
+        case "$(uname -m)" in
+            aarch64|x86_64) agent="x11-bridge-agent-$(uname -m)";;
+            *) echo 'The bundled bridge agent supports ARM64 and x86-64 Linux.' >&2; exit 1;;
+        esac
+        dir="$HOME/.local/bin"
+        mkdir -p "$dir"
+        tmp=$(mktemp "$dir/.x11-bridge-agent.XXXXXX")
+        trap 'rm -f "$tmp"' EXIT
+        tar -xOf - "$agent" > "$tmp"
+        test -s "$tmp"
+        chmod 755 "$tmp"
+        mv -f "$tmp" "$dir/x11-bridge-agent""#,
+    );
+    Task::spawn(command, move |mut stdout, mut stdin| {
+        let sent = io::copy(&mut archive, &mut stdin);
+        drop(stdin);
+        io::copy(&mut stdout, &mut io::sink())?;
+        sent.map(|_| ())
+    })
+}
+
+pub type Icons = HashMap<String, Arc<[u8]>>;
+
+pub fn icons(host: &Host, apps: &[App]) -> Result<Task<Icons>, String> {
+    let ids = apps
+        .iter()
+        .map(|app| app.id.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let script = include_str!("remote/icons.py").replace('\'', "'\\''");
+    let mut command = host.ssh_command();
+    command.arg(format!(
+        "command -v python3 >/dev/null || exit 0; exec python3 -c '{script}'"
+    ));
+    Task::spawn(command, move |stdout, mut stdin| {
+        // The helper can exit without reading when Python is unavailable.
+        if let Err(error) = stdin.write_all(ids.as_bytes())
+            && error.kind() != io::ErrorKind::BrokenPipe
+        {
+            return Err(error);
+        }
+        drop(stdin);
+        read_icons(BufReader::new(stdout))
+    })
+}
+
+fn read_icons(mut reader: impl BufRead) -> io::Result<Icons> {
+    let invalid = || io::Error::other("Invalid remote icon catalogue");
+    let mut remaining = 16 * 1024 * 1024;
+    let mut icons = Icons::new();
+    loop {
+        let mut header = String::new();
+        let size = reader.by_ref().take(4112).read_line(&mut header)?;
+        if size == 0 {
+            return Ok(icons);
+        }
+        let (id, length) = header
+            .strip_suffix('\n')
+            .and_then(|line| line.split_once('\t'))
+            .ok_or_else(invalid)?;
+        let length = length
+            .parse::<usize>()
+            .ok()
+            .filter(|length| (24..=96 * 1024).contains(length))
+            .ok_or_else(invalid)?;
+        if id.is_empty()
+            || id.len() > 4096
+            || id.chars().any(char::is_control)
+            || size + length > remaining
+        {
+            return Err(invalid());
+        }
+        remaining -= size + length;
+        let mut data = vec![0; length];
+        reader.read_exact(&mut data)?;
+        if data.starts_with(b"\x89PNG\r\n\x1a\n\0\0\0\x0dIHDR")
+            && [16, 20].into_iter().all(|i| {
+                (1..=128).contains(&u32::from_be_bytes(data[i..i + 4].try_into().unwrap()))
+            })
+        {
+            icons.insert(id.into(), data.into());
+        }
+    }
 }
 
 pub struct Watch {
