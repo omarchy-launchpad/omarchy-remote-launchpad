@@ -1,0 +1,193 @@
+name: Build and release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Rolling release channel to rebuild
+        required: true
+        type: choice
+        options:
+          - bleeding-edge
+          - nightly
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-linux-agent:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
+    steps:
+      - name: Check out launchpad
+        uses: actions/checkout@v4
+        with:
+          path: omarchy-remote-launchpad
+
+      - name: Read bridge revision
+        id: bridge
+        run: echo "rev=$(cat omarchy-remote-launchpad/.github/x11-bridge-rev)" >> "$GITHUB_OUTPUT"
+
+      - name: Check out pinned x11-bridge
+        uses: actions/checkout@v4
+        with:
+          repository: omarchy-launchpad/x11-bridge
+          ref: ${{ steps.bridge.outputs.rev }}
+          path: x11-bridge
+
+      - name: Build static agent
+        working-directory: x11-bridge
+        env:
+          AGENT_ARCH: ${{ matrix.arch }}
+        run: |
+          docker run --rm -v "$PWD:/work" -w /work rust:1-alpine \
+            sh -ec 'apk add --no-cache musl-dev && cargo build --release --locked -p x11-bridge-agent'
+          cp target/release/x11-bridge-agent "x11-bridge-agent-$AGENT_ARCH"
+
+      - name: Upload Linux agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-agent-${{ matrix.arch }}
+          path: x11-bridge/x11-bridge-agent-${{ matrix.arch }}
+          if-no-files-found: error
+
+  build-and-release:
+    needs: build-linux-agent
+    runs-on: macos-15
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check out launchpad
+        uses: actions/checkout@v4
+        with:
+          path: omarchy-remote-launchpad
+
+      - name: Select build channel
+        id: release
+        working-directory: omarchy-remote-launchpad
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            tag=${GITHUB_REF#refs/tags/}
+            .github/scripts/check-release-version "$tag"
+            channel=stable
+            version=${tag#v}
+          elif [[ "$GITHUB_EVENT_NAME" == schedule ]]; then
+            channel=nightly
+            version=nightly
+          elif [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            channel='${{ inputs.channel }}'
+            version=$channel
+          else
+            channel=bleeding-edge
+            version=bleeding-edge
+          fi
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "bridge_rev=$(cat .github/x11-bridge-rev)" >> "$GITHUB_OUTPUT"
+
+      # Cargo.toml deliberately uses ../x11-bridge, matching the local checkout layout.
+      - name: Check out pinned x11-bridge
+        uses: actions/checkout@v4
+        with:
+          repository: omarchy-launchpad/x11-bridge
+          ref: ${{ steps.release.outputs.bridge_rev }}
+          path: x11-bridge
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: omarchy-remote-launchpad
+
+      - name: Check and test
+        working-directory: omarchy-remote-launchpad
+        run: |
+          make check
+          make test
+
+      - name: Download bundled Linux agents
+        uses: actions/download-artifact@v4
+        with:
+          pattern: linux-agent-*
+          path: omarchy-remote-launchpad/dist/linux-agents
+          merge-multiple: true
+
+      - name: Build disk image
+        working-directory: omarchy-remote-launchpad
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          OMARCHY_LAUNCHPAD_LINUX_AGENTS: dist/linux-agents
+        run: |
+          make dmg
+          mv dist/omarchy-launchpad.dmg "dist/omarchy-launchpad-${VERSION}-macos.dmg"
+          (cd dist && shasum -a 256 "omarchy-launchpad-${VERSION}-macos.dmg" > SHA256SUMS)
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: omarchy-launchpad-${{ steps.release.outputs.version }}-macos
+          path: |
+            omarchy-remote-launchpad/dist/*.dmg
+            omarchy-remote-launchpad/dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish stable release
+        if: steps.release.outputs.channel == 'stable'
+        working-directory: omarchy-remote-launchpad
+        env:
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(--verify-tag --generate-notes --title "$TAG")
+          [[ "$VERSION" == *-* ]] && args+=(--prerelease)
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/*.dmg dist/SHA256SUMS --clobber
+          else
+            gh release create "$TAG" "${args[@]}" dist/*.dmg dist/SHA256SUMS
+          fi
+
+      - name: Publish rolling release
+        if: steps.release.outputs.channel != 'stable'
+        working-directory: omarchy-remote-launchpad
+        env:
+          CHANNEL: ${{ steps.release.outputs.channel }}
+          SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CHANNEL" in
+            bleeding-edge) title='Bleeding edge' ;;
+            nightly) title='Nightly' ;;
+            *) echo "unknown rolling channel: $CHANNEL" >&2; exit 1 ;;
+          esac
+          git tag --force "$CHANNEL" "$SHA"
+          git push origin "refs/tags/$CHANNEL" --force
+          notes="Automated $title build of [$SHA]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$SHA)."
+          if gh release view "$CHANNEL" >/dev/null 2>&1; then
+            gh release edit "$CHANNEL" --target "$SHA" --title "$title" --notes "$notes" --prerelease
+            gh release upload "$CHANNEL" dist/*.dmg dist/SHA256SUMS --clobber
+          else
+            gh release create "$CHANNEL" --target "$SHA" --title "$title" --notes "$notes" --prerelease dist/*.dmg dist/SHA256SUMS
+          fi

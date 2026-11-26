@@ -1,0 +1,35 @@
+#!/bin/sh
+set -eu
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 v<semver>" >&2
+    exit 2
+fi
+
+tag=$1
+if ! printf '%s\n' "$tag" | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+    echo "release tag must be a semantic version prefixed with v (for example, v1.2.3 or v1.2.3-rc.1): $tag" >&2
+    exit 1
+fi
+
+manifest_version=$(awk -F ' *= *' '
+    /^\[package\]$/ { package = 1; next }
+    /^\[/ { package = 0 }
+    package && $1 == "version" {
+        gsub(/^"|"$/, "", $2)
+        print $2
+        exit
+    }
+' Cargo.toml)
+
+if [ -z "$manifest_version" ]; then
+    echo "could not read package.version from Cargo.toml" >&2
+    exit 1
+fi
+
+if [ "v$manifest_version" != "$tag" ]; then
+    echo "tag $tag does not match Cargo.toml package version $manifest_version" >&2
+    exit 1
+fi
+
+echo "release version $manifest_version matches $tag"
