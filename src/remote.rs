@@ -23,9 +23,29 @@ pub fn token() -> io::Result<String> {
 
 fn ssh(p: &Host, args: &[&str]) -> Command {
     let mut cmd = p.ssh_command();
-    let mut remote = String::from(
-        "agent=$(command -v x11-bridge-agent) || agent=\"$HOME/.local/bin/x11-bridge-agent\"; [ -x \"$agent\" ] || { echo 'Install the current x11-bridge-agent in ~/.local/bin on Linux.' >&2; exit 1; }; exec \"$agent\" --desktop",
-    );
+    let mut remote = match p {
+        Host::Ssh(_) => String::from(
+            r#"agent=$(command -v x11-bridge-agent) || agent="$HOME/.local/bin/x11-bridge-agent"
+[ -x "$agent" ] || { echo 'Install the current x11-bridge-agent in ~/.local/bin on Linux.' >&2; exit 1; }
+"#,
+        ),
+        Host::LocalVm { .. } => String::from(
+            r#"agent="$HOME/.local/bin/x11-bridge-agent"
+[ -x "$agent" ] || { echo 'Run scripts/local-vm setup to install the agent.' >&2; exit 1; }
+"#,
+        ),
+    };
+    if matches!(p, Host::LocalVm { .. }) && args == ["list"] {
+        remote.push_str(r#"extensions=$(systemd-run --user --pipe --wait --quiet xdpyinfo -queryExtensions) || {
+    echo 'Log in to the Omarchy desktop and retry Refresh.' >&2
+    exit 1
+}
+for ext in Composite DAMAGE X-Resource XTEST; do
+    printf '%s\n' "$extensions" | grep -qw "$ext" || { echo "Missing Xwayland extension: $ext" >&2; exit 1; }
+done
+"#);
+    }
+    remote.push_str(r#"exec "$agent" --desktop"#);
     for arg in args {
         remote.push_str(" '");
         remote.push_str(&arg.replace('\'', "'\\''"));

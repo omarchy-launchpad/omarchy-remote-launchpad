@@ -146,6 +146,19 @@ define_class!(
         fn choose(&self, _: Option<&AnyObject>) {
             self.with(|c| if let Err(e) = c.launch() { c.launcher.error(&e); });
         }
+        #[unsafe(method(startLocalVM:))]
+        fn start_local_vm(&self, _: Option<&AnyObject>) {
+            let result = std::process::Command::new("/usr/bin/open")
+                .args(["-b", "dev.tryomarchy.native"]).status();
+            self.with(|c| {
+                c.launcher.present();
+                if result.is_ok_and(|status| status.success()) {
+                    c.launcher.set_status("Launch Omarchy, log in, then press Refresh.");
+                } else {
+                    c.launcher.error("Install Try Omarchy on an Apple silicon Mac with macOS 15 or newer.");
+                }
+            });
+        }
         #[unsafe(method(refresh:))]
         fn refresh(&self, _: Option<&AnyObject>) {
             self.with(|c| c.launcher.refresh(Host::load()));
@@ -239,6 +252,12 @@ fn setup(mtm: MainThreadMarker, host: Result<Host, String>) -> Retained<Delegate
             &text(""),
         );
         open.setTarget(Some(&delegate));
+        let vm = menu.addItemWithTitle_action_keyEquivalent(
+            &text("Open Local VM…"),
+            Some(sel!(startLocalVM:)),
+            &text(""),
+        );
+        vm.setTarget(Some(&delegate));
         menu.addItemWithTitle_action_keyEquivalent(
             &text("Quit Seams"),
             Some(sel!(terminate:)),
