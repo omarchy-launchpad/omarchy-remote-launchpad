@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+"""Launch every catalogued app and record whether the X11 agent finds a window."""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import os
+from pathlib import Path
+import re
+import secrets
+import select
+import shlex
+import subprocess
+import threading
+import time
+
+ROOT = Path(__file__).resolve().parent.parent
+UNSAFE = {
+    "limine-snapper-restore.desktop": "system restore utility",
+    "wine-Programs-MetaTrader 5-Uninstall.desktop": "uninstaller",
+}
+
+
+def ssh_command(target: str, remote: str) -> list[str]:
+    return [
+        "/usr/bin/ssh",
+        "-T",
+        "-x",
+        "-oBatchMode=yes",
+        "-oStrictHostKeyChecking=yes",
+        "-oControlMaster=auto",
+        "-oControlPersist=120",
+        "-oControlPath=~/.ssh/omarchy-launchpad-z-%C",
+        "-oConnectTimeout=8",
+        "--",
+        target,
+        remote,
+    ]
+
+
+def agent_command(arguments: list[str]) -> str:
+    suffix = " ".join(shlex.quote(argument) for argument in arguments)
+    return (
+        'agent=$(command -v x11-bridge-agent) || '
+        'agent="$HOME/.local/bin/x11-bridge-agent"; '
+        '[ -x "$agent" ] || exit 127; '
+        f'exec "$agent" --desktop {suffix}'
+    )
+
+
+def catalogue(target: str) -> list[tuple[str, str]]:
+    result = subprocess.run(
+        ssh_command(target, agent_command(["list"])),
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        timeout=30,
+    )
+    apps = []
+    for line in result.stdout.splitlines():
+        desktop_id, separator, name = line.partition("\t")
+        if not separator:
+            raise RuntimeError(f"invalid catalogue record: {line!r}")
+        apps.append((desktop_id, name))
+    return apps
+
+
+def classify(stderr: str, timed_out: bool, exit_code: int | None) -> str:
+    if "ssh:" in stderr and ("connect to host" in stderr or "mux_client" in stderr):
+        return "transport-error"
+    if timed_out:
+        return "timeout"
+    if "No launch-owned X11 window appeared" in stderr:
+        return "no-x11-window"
+    if "GIO could not launch" in stderr:
+        return "launch-failed"
+    if "No authenticated desktop DISPLAY" in stderr:
+        return "no-display"
+    if exit_code not in (None, 0):
+        return "agent-error"
+    return "no-window"
+
+
+def audit_one(target: str, desktop_id: str, timeout: float) -> tuple[str, str]:
+    token = secrets.token_hex(16)
+    process = subprocess.Popen(
+        ssh_command(target, agent_command(["open", token, desktop_id])),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        bufsize=1,
+    )
+    errors: list[str] = []
+
+    def read_errors() -> None:
+        assert process.stderr is not None
+        errors.extend(process.stderr)
+
+    reader = threading.Thread(target=read_errors, daemon=True)
+    reader.start()
+    deadline = time.monotonic() + timeout
+    xid = None
+    timed_out = False
+    assert process.stdout is not None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        ready, _, _ = select.select([process.stdout], [], [], 0.25)
+        if ready:
+            line = process.stdout.readline().strip()
+            if line.isdigit() and int(line) > 0:
+                xid = line
+                break
+    else:
+        timed_out = True
+
+    if process.stdin is not None:
+        process.stdin.close()
+        process.stdin = None
+    try:
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+    reader.join(timeout=2)
+    diagnostic = "".join(errors).strip()
+    if xid is not None:
+        return "ok", f"xid={xid}\n{diagnostic}".strip()
+    return classify(diagnostic, timed_out, process.returncode), diagnostic
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=Path, default=ROOT / "omarchy-launchpad.local")
+    parser.add_argument("--timeout", type=float, default=24.0)
+    parser.add_argument("--only", help="case-insensitive regex matched against ID and name")
+    parser.add_argument("--include-unsafe", action="store_true")
+    parser.add_argument("--output", type=Path)
+    args = parser.parse_args()
+
+    target = args.config.read_text().strip()
+    if not target or target.startswith("-") or any(character.isspace() for character in target):
+        raise SystemExit(f"invalid SSH target in {args.config}")
+    try:
+        apps = catalogue(target)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        detail = getattr(error, "stderr", "") or str(error)
+        raise SystemExit(f"cannot read remote launch catalogue: {detail.strip()}") from None
+    if args.only:
+        pattern = re.compile(args.only, re.IGNORECASE)
+        apps = [(desktop_id, name) for desktop_id, name in apps if pattern.search(f"{desktop_id}\t{name}")]
+    stamp = dt.datetime.now(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+    output = args.output or ROOT / "target" / "launch-audit" / stamp
+    output.mkdir(parents=True, exist_ok=True)
+    summary = output / "summary.tsv"
+
+    counts: dict[str, int] = {}
+    with summary.open("w") as table:
+        table.write("desktop_id\tname\tresult\n")
+        for index, (desktop_id, name) in enumerate(apps, 1):
+            if desktop_id in UNSAFE and not args.include_unsafe:
+                result = "skipped-unsafe"
+                diagnostic = UNSAFE[desktop_id]
+            else:
+                print(f"[{index}/{len(apps)}] {name} ({desktop_id})", flush=True)
+                result, diagnostic = audit_one(target, desktop_id, args.timeout)
+            counts[result] = counts.get(result, 0) + 1
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", desktop_id)
+            (output / f"{safe_name}.log").write_text(diagnostic + "\n")
+            table.write(f"{desktop_id}\t{name}\t{result}\n")
+            table.flush()
+            print(f"  {result}", flush=True)
+            if result == "transport-error":
+                print("Stopping: SSH transport is unavailable; remaining apps were not tested.")
+                break
+
+    print(f"\nReport: {summary}")
+    print("Results: " + ", ".join(f"{key}={value}" for key, value in sorted(counts.items())))
+    return 1 if any(key not in {"ok", "skipped-unsafe"} for key in counts) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
