@@ -1,7 +1,5 @@
 # Omarchy Remote Launchpad
 
-![Demo of Omarchy Remote Launchpad opening Linux apps in native macOS windows](launchpad-demo.gif)
-
 ![Omarchy Remote Launchpad with a remote ChatGPT window on macOS](screenshot.png)
 
 Work with an Omarchy virtual machine or remote machine seamlessly from your Mac (broader support TBC)
@@ -11,6 +9,8 @@ Work with an Omarchy virtual machine or remote machine seamlessly from your Mac 
 The main goal for this project is to meld an Omarchy machine with your current host. This means using applications installed on Omarchy as if it were native to MacOS or Windows
 
 This means it is almost indistinguishable from your native applications, allowing you to get the best of both worlds with as little friction as possible
+
+![Demo of Omarchy Remote Launchpad opening Linux apps in native macOS windows](launchpad-demo.gif)
 
 ## Limitations
 
